@@ -64,7 +64,8 @@ A Home Assistant integration + Lovelace card for tracking your garden. Plan grow
 1. Go to [RapidAPI's Verdantly Gardening API page](https://rapidapi.com/verdantly-team-verdantly-team-default/api/verdantly-gardening-api).
 2. Sign up for a free RapidAPI account.
 3. Subscribe to the **Basic (Free)** plan — 25 API calls per month, no credit card required.
-4. Copy your **X-RapidAPI-Key** from the dashboard. This is what Agribuddy needs.
+4. Ensure your RapidAPI app/console is set to API "V1".
+5. Copy your **X-RapidAPI-Key** from the dashboard. This is what Agribuddy needs.
 
 ### 2. Add the integration
 
