@@ -167,6 +167,7 @@ class AgribuddyCoordinator(DataUpdateCoordinator):
         return {
             "weather": weather,
             "plants": plants,
+            "plots": self.store.get_all_plots(),
             "frost_tonight": frost_tonight,
             "rain_today": rain_today,
         }
@@ -330,6 +331,11 @@ class AgribuddyCoordinator(DataUpdateCoordinator):
 
     def get_plants(self) -> list:
         return (self.data or {}).get("plants", [])
+
+    def get_plots(self) -> list:
+        """Enriched grow plots (each with a `plants` list). Excludes nothing
+        here — consumers filter out the virtual Unassigned plot as needed."""
+        return (self.data or {}).get("plots", [])
 
     def is_frost_tonight(self) -> bool:
         return bool((self.data or {}).get("frost_tonight", False))

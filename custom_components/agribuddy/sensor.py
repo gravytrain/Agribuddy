@@ -42,6 +42,30 @@ def _device(entry: ConfigEntry) -> DeviceInfo:
     )
 
 
+def plant_is_thirsty(p: dict) -> bool:
+    """True when an enriched plant is overdue for water.
+
+    Shared by PlantSensor (status="thirsty") and the per-plot binary sensor
+    so both agree on what "thirsty" means. A plant counts as thirsty only if
+    it's an active, waterable plant past its watering threshold. Terminal
+    (harvested/dead) and scheduled plants are never thirsty. Frost is a
+    separate, more-urgent condition handled by PlantSensor and is
+    intentionally not considered here — this is purely the water check.
+    """
+    if not p:
+        return False
+    events = p.get("events") or p.get("events_sorted") or []
+    for e in events:
+        et = (e.get("type") or "").lower()
+        if et in (EVENT_DEAD, EVENT_HARVESTED):
+            return False
+    if p.get("is_scheduled"):
+        return False
+    threshold = p.get("watering_min_days") or 3
+    days_w = p.get("days_since_watered")
+    return days_w is not None and days_w >= threshold
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -222,9 +246,7 @@ class PlantSensor(CoordinatorEntity[AgribuddyCoordinator], SensorEntity):
             pass
 
         # ── 4. Thirsty: overdue for water ─────────────────────────────────
-        threshold = p.get("watering_min_days") or 3
-        days_w = p.get("days_since_watered")
-        if days_w is not None and days_w >= threshold:
+        if plant_is_thirsty(p):
             return "thirsty"
 
         # ── 5. Default: healthy ───────────────────────────────────────────
