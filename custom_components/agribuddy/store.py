@@ -585,6 +585,16 @@ class PlantStore:
             "created_at": _now(),
         }
         plant["events"].append(event)
+        # When a plant is harvested, move it out of its grow plot to the
+        # virtual "Unassigned" group. A harvested plant is effectively done
+        # being tended in that bed; clearing plot_id + location removes it
+        # from the plot view and from the plot's all-thirsty calculation.
+        if event_type == EVENT_HARVESTED:
+            plant["plot_id"] = None
+            plant["location"] = ""
+            _LOGGER.debug(
+                "Agribuddy: plant id=%s harvested — moved to Unassigned", plant_id
+            )
         await self._save()
         return event
 
