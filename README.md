@@ -10,7 +10,10 @@ A Home Assistant integration + Lovelace card for tracking your garden. Plan grow
 [![HACS](https://img.shields.io/badge/HACS-default-orange.svg?style=flat-square)](https://hacs.xyz)
 
 ---
+# v1.1.4 UPDATE NOTE
+There is a known bug with this most recent update. HACS sometimes added in the version tag (in this case 114) to the end of hacstags in resources. If after updating you find that you cannot load the card, go into 'Dashboard > Resources' and find the 'agribuddy-card' entry and remove the '114' at the end of the hacstags string, then reload the page/clear the cache.
 
+---
 ## Features
 
 - **Plant database** — search 440,000+ plant species and 15,000+ cultivated varieties via the [Verdantly Gardening API](https://verdantly.io/docs/introduction). Includes plant data like care instructions, hardiness zones, soil and pH preferences, harvest timing, toxicity warnings, and more.
