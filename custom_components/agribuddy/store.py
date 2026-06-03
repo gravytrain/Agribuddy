@@ -948,7 +948,7 @@ class PlantStore:
         p["hardiness_zone_max"] = hz_max
         # Pre-composed range string for display
         if hz_min is not None and hz_max is not None and hz_min != hz_max:
-            p["hardiness_zone_range"] = f"{hz_min}–{hz_max}" 
+            p["hardiness_zone_range"] = f"{hz_min}–{hz_max}"
         elif hz_min is not None:
             p["hardiness_zone_range"] = str(hz_min)
         elif hz_max is not None:
