@@ -98,6 +98,12 @@ async def async_setup_entry(
     )
     mgr = PlantSensorManager(hass, coord, entry, async_add_entities)
     coord.async_add_listener(mgr.refresh)
+    # Initial reconcile so existing plants get their entities re-created and
+    # re-bound to this config entry immediately on setup — without this, a
+    # reload/upgrade leaves previously-registered entities orphaned (shown
+    # with a "reconnect" prompt) until the first coordinator refresh fires
+    # the listener. Running it here guarantees synchronous re-association.
+    mgr.refresh()
 
 
 class WeatherMirror(CoordinatorEntity[AgribuddyCoordinator], SensorEntity):

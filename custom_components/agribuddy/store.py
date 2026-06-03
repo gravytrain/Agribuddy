@@ -105,17 +105,61 @@ class PlantStore:
         # moved to `archived_plants` (slim history) to keep the species
         # cache from growing unbounded while preserving season-view data.
         archived = self._archive_old_deleted_plants()
+        migrated = await self._migrate_location_to_plot_id()
         _LOGGER.debug(
             "Agribuddy: loaded %d plants (%d soft-deleted, kept for Recent), "
             "%d plots, %d archived (history only), %d weather-log entries, "
-            "archived %d this load",
+            "archived %d this load, migrated %d location→plot_id",
             len(self._data["plants"]),
             sum(1 for p in self._data["plants"].values() if p.get("deleted_at")),
             len(self._data["plots"]),
             len(self._data["archived_plants"]),
             len(self._data["weather_log"]),
             archived,
+            migrated,
         )
+
+    async def _migrate_location_to_plot_id(self) -> int:
+        """One-time migration: convert legacy free-text `location` values to
+        `plot_id` references.
+
+        Before v1.1.5 a plant's grow-plot association could be stored as a
+        free-text `location` string (matched to a plot by name at read time).
+        v1.1.5 makes `plot_id` the single source of truth. This walks every
+        plant that has a `location` but no `plot_id`, finds a plot whose name
+        matches (case-insensitive), and sets `plot_id` accordingly. The
+        `location` field is then cleared so it can't shadow the plot_id.
+
+        Plants whose `location` doesn't match any plot name are left as-is
+        (location preserved) so no association is silently lost — they simply
+        keep resolving to Unassigned until the user reassigns via the dropdown.
+
+        Idempotent: once migrated, plants have plot_id set (or an unmatched
+        location), so subsequent loads find nothing to do. Returns the count
+        migrated this run.
+        """
+        # Build a name→id map of real plots (case-insensitive)
+        name_to_id = {
+            (plot.get("name") or "").strip().lower(): pid
+            for pid, plot in self._data["plots"].items()
+        }
+        migrated = 0
+        for plant in self._data["plants"].values():
+            loc = (plant.get("location") or "").strip()
+            if not loc or plant.get("plot_id"):
+                continue
+            match_id = name_to_id.get(loc.lower())
+            if match_id:
+                plant["plot_id"] = match_id
+                plant["location"] = ""
+                migrated += 1
+        if migrated:
+            await self._save()
+            _LOGGER.info(
+                "Agribuddy: migrated %d plant(s) from location text to plot_id",
+                migrated,
+            )
+        return migrated
 
     def _archive_old_deleted_plants(self) -> int:
         """Move soft-deleted plants whose `deleted_at` is older than 6 months
@@ -302,17 +346,20 @@ class PlantStore:
             for p in self._active_plants()
             if not p.get("plot_id") and not p.get("location")
         ]
-        if unassigned:
-            out.append(
-                {
-                    "id": "_unassigned",
-                    "name": "Unassigned",
-                    "description": "Plants not yet assigned to a grow plot",
-                    "plants": unassigned,
-                    "plant_count": len(unassigned),
-                    "virtual": True,
-                }
-            )
+        # Always surface the virtual Unassigned plot (even when empty) so the
+        # card can show it as a selectable tile and offer it in the plant
+        # plot-assignment dropdown. `virtual: True` flags it so the UI hides
+        # plot-management actions (rename/remove) that don't apply.
+        out.append(
+            {
+                "id": "_unassigned",
+                "name": "Unassigned",
+                "description": "Plants not yet assigned to a grow plot",
+                "plants": unassigned,
+                "plant_count": len(unassigned),
+                "virtual": True,
+            }
+        )
         return out
 
     def get_plot(self, plot_id: str) -> dict | None:
@@ -392,6 +439,11 @@ class PlantStore:
         species_data: dict | None = None,
     ) -> dict:
         pid = str(uuid.uuid4())
+        # The card may pass plot_id="_unassigned" (the virtual plot) to mean
+        # "no plot". Persist that as None so get_all_plots resolves it to the
+        # Unassigned group.
+        if plot_id == "_unassigned":
+            plot_id = None
         plant = {
             "id": pid,
             "name": name,
@@ -434,6 +486,16 @@ class PlantStore:
         for k, v in kwargs.items():
             if k in allowed:
                 plant[k] = v
+        # Normalize the virtual Unassigned selection: the card sends
+        # plot_id="_unassigned" to mean "no plot". Persist that as plot_id=None
+        # and clear any stale free-text location so the plant resolves to the
+        # Unassigned group in get_all_plots (which matches on plot_id AND
+        # location). Assigning to a real plot likewise clears location so the
+        # plot_id is the single source of truth.
+        if "plot_id" in kwargs:
+            if plant.get("plot_id") == "_unassigned":
+                plant["plot_id"] = None
+            plant["location"] = ""
         await self._save()
         return self._enrich(plant)
 
@@ -886,7 +948,7 @@ class PlantStore:
         p["hardiness_zone_max"] = hz_max
         # Pre-composed range string for display
         if hz_min is not None and hz_max is not None and hz_min != hz_max:
-            p["hardiness_zone_range"] = f"{hz_min}–{hz_max}"
+            p["hardiness_zone_range"] = f"{hz_min}–{hz_max}"  # noqa: RUF001
         elif hz_min is not None:
             p["hardiness_zone_range"] = str(hz_min)
         elif hz_max is not None:
@@ -910,7 +972,7 @@ class PlantStore:
         p["soil_ph_min"] = ph_min
         p["soil_ph_max"] = ph_max
         if ph_min is not None and ph_max is not None and ph_min != ph_max:
-            p["soil_ph_range"] = f"{ph_min}–{ph_max}"
+            p["soil_ph_range"] = f"{ph_min}–{ph_max}"  # noqa: RUF001
         elif ph_min is not None:
             p["soil_ph_range"] = str(ph_min)
         elif ph_max is not None:
@@ -924,7 +986,7 @@ class PlantStore:
         p["days_to_harvest_min"] = h_min
         p["days_to_harvest_max"] = h_max
         if h_min is not None and h_max is not None and h_min != h_max:
-            p["harvest_range"] = f"{h_min}–{h_max} days"
+            p["harvest_range"] = f"{h_min}–{h_max} days"  # noqa: RUF001
         elif h_min is not None:
             p["harvest_range"] = f"{h_min} days"
         elif h_max is not None:
