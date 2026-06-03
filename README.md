@@ -83,7 +83,7 @@ There is a known bug with this most recent update. HACS sometimes added in the v
 2. (Optional) Set a card title and starting layout. Defaults are sensible.
 3. Save.
 
-The integration also creates one sensor entity per added plant: `sensor.<plant_name>` with state `healthy` / `thirsty` / `danger` / `harvested` / `dead` / `scheduled`. Use these directly in automations.
+The integration also creates one sensor entity per added plant: `sensor.<plant_name>` with state `healthy` / `thirsty` / `danger` / `harvested` / `dead` / `scheduled` and per grow plot: `sensor.<grow_plot_name>` with states `off` and `on`. Use these directly in automations.
 
 ---
 
@@ -105,6 +105,11 @@ Each plant's sensor reports one of six states:
 | `danger` | Frost forecast on weather entity | Red | ❄️ |
 | `harvested` | Harvest event logged — terminal until plant deleted | Grey | 🧺 |
 | `dead` | Dead event logged — terminal until plant deleted | Dark grey | 💀 |
+
+Each grow plot's sensor reports one of 2 states:
+| State | When | 
+| `off` | Default - All plants in grow plot were watered recently, not thirsty |
+| `on` | All plants in grow plot are thirsty and need watered |
 
 Frost takes precedence over thirsty (more urgent). Dead trumps harvested (a dead plant wasn't harvested).
 
