@@ -1,6 +1,11 @@
 /**
- * Agribuddy Card  v1.1.4
+ * Agribuddy Card  v1.1.5
  * type: custom:agribuddy-card
+ *
+ * v1.1.5 — Grow plot dropdown + Unassigned plot surfacing
+ *  - Plant details: "Grow plot" is now a dropdown (Unassigned first, then
+ *    plots alphabetically) instead of a free-text field; saves via plot_id.
+ *  - The virtual "Unassigned" plot is always shown as a selectable tile.
  *
  * v1.1.4 — Water all + duplicate plant + section reorder + scroll containers
  *  - Fixed unability for user to drill down into plant details using the scrollable plant list.
@@ -1525,7 +1530,7 @@ class AgribuddyCard extends HTMLElement {
 
       <div id="view-container"></div>
 
-      <div style="margin-top:14px;font-size:10px;color:var(--secondary-text-color);opacity:.45;text-align:right;user-select:none">agribuddy-v1.1.4</div>
+      <div style="margin-top:14px;font-size:10px;color:var(--secondary-text-color);opacity:.45;text-align:right;user-select:none">agribuddy-v1.1.5</div>
 
       ${this._tplPlantOverlay()}
       ${this._tplSettingsOverlay()}
@@ -2499,7 +2504,7 @@ class AgribuddyCard extends HTMLElement {
                 <select class="form-select" id="ps-start-type"><option value="seed">Seed</option><option value="transplant">Transplant</option></select>
               </div>
               <div class="form-row"><span class="form-label">Start date</span><input class="form-input" type="date" id="ps-start-date"></div>
-              <div class="form-row"><span class="form-label">Grow plot / location</span><input class="form-input" type="text" id="ps-location"></div>
+              <div class="form-row"><span class="form-label">Grow plot</span><select class="form-input" id="ps-plot"></select></div>
               <div style="display:flex;gap:8px;margin-top:4px">
                 <button class="btn btn-accent" style="flex:1;padding:8px" id="save-ps-btn">Save</button>
                 <button class="btn" id="duplicate-plant-btn">⧉ Duplicate</button>
@@ -2721,7 +2726,20 @@ class AgribuddyCard extends HTMLElement {
     this._el("ps-slug").value = plant.species_id || "";
     this._el("ps-start-type").value = plant.start_type || "seed";
     this._el("ps-start-date").value = plant.start_date || "";
-    this._el("ps-location").value = plant.location || "";
+    // Populate the grow-plot dropdown: "Unassigned" first, then all real
+    // plots alphabetically. Select the plant's current plot (or Unassigned).
+    const psPlot = this._el("ps-plot");
+    if (psPlot) {
+      const realPlots = (this._plotsCache || [])
+        .filter(p => p.id !== "_unassigned" && !p.virtual)
+        .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+      const opts = ['<option value="_unassigned">Unassigned</option>'];
+      for (const p of realPlots) {
+        opts.push(`<option value="${this._esc(p.id)}">${this._esc(p.name || "(unnamed)")}</option>`);
+      }
+      psPlot.innerHTML = opts.join("");
+      psPlot.value = plant.plot_id || "_unassigned";
+    }
 
     // ── Edit-details overrides pre-fill ───────────────────────────────
     this._populateOverrideForm(plant);
@@ -2917,7 +2935,7 @@ class AgribuddyCard extends HTMLElement {
     const name = (this._el("ps-name")?.value || "").trim();
     const stype = this._el("ps-start-type")?.value || "seed";
     const sdate = this._el("ps-start-date")?.value || "";
-    const loc = (this._el("ps-location")?.value || "").trim();
+    const plotId = this._el("ps-plot")?.value || "_unassigned";
     if (!name) {
       this._err("Name required", "Display name cannot be empty.");
       return;
@@ -2926,7 +2944,7 @@ class AgribuddyCard extends HTMLElement {
       plant_id: pid,
       plant_name: name,
       start_type: stype,
-      location: loc,
+      plot_id: plotId,
     };
     // Only include start_date if non-empty — sending "" trips date schema.
     if (sdate) data.start_date = sdate;
@@ -3373,7 +3391,7 @@ class AgribuddyCard extends HTMLElement {
         <span style="color:var(--secondary-text-color)">API client:</span>
         <span style="color:${ok ? "#0F6E56" : "#993C1D"};font-weight:600">${ok ? "✓ Ready" : "✗ Not loaded"}</span>${usageRow}
         <span style="color:var(--secondary-text-color)">Backend http_api:</span>
-        <span style="font-family:monospace;font-size:11px">${data.http_api_version || "(missing — file is older than v1.1.4)"}</span>
+        <span style="font-family:monospace;font-size:11px">${data.http_api_version || "(missing — file is older than v1.1.5)"}</span>
       </div>`;
       // Pre-fill the form fields from backend values when card config doesn't override
       const wsel = this._el("cfg-weather");
@@ -4171,7 +4189,7 @@ if (!window.customCards.some(c => c.type === "agribuddy-card")) {
   });
 }
 console.info(
-  "%c Agribuddy CARD %c v1.1.4 ",
+  "%c Agribuddy CARD %c v1.1.5 ",
   "background:#1D9E75;color:#fff;font-weight:bold;padding:2px 4px;border-radius:4px 0 0 4px",
   "background:#0F6E56;color:#fff;padding:2px 4px;border-radius:0 4px 4px 0",
 );
