@@ -558,11 +558,15 @@ def _register_services(hass: HomeAssistant) -> None:
                 call.data[ATTR_EVENT_TYPE], "observation"
             )
             try:
+                # FarmOS requires full ISO 8601 datetime, not just a date
+                farmos_timestamp = None
+                if d:
+                    farmos_timestamp = f"{d.isoformat()}T12:00:00+00:00"
                 await farmos.create_log(
                     log_type=farmos_log_type,
                     name=f"{call.data[ATTR_EVENT_TYPE]} — {call.data[ATTR_PLANT_ID][:8]}",
                     notes=call.data.get(ATTR_EVENT_NOTE, ""),
-                    timestamp=d.isoformat() if d else None,
+                    timestamp=farmos_timestamp,
                 )
             except Exception as err:
                 _LOGGER.warning(
