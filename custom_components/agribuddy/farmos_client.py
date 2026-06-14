@@ -186,27 +186,31 @@ class FarmOSClient:
     async def create_plant_type(self, variety: PlantVariety) -> dict:
         """Create a plant_type taxonomy term from a canonical PlantVariety.
 
-        Maps canonical fields to FarmOS taxonomy term fields. Core fields
-        (name, maturity_days) are set directly. Extended reference data is
-        stored in the 'data' field as JSON for now (until custom fields module).
+        Maps canonical fields to FarmOS taxonomy term fields. Only uses
+        fields that exist on the plant_type bundle (name, description,
+        maturity_days). Full reference data is stored in the description
+        as a JSON block until custom fields are added.
         """
         import json
+
+        # Store reference data in description alongside human-readable text
+        reference_json = json.dumps(variety.to_dict())
+        description_text = variety.description or variety.name
+        description_with_ref = (
+            f"{description_text}\n\n"
+            f"<!-- agribuddy_ref: {reference_json} -->"
+        )
 
         attributes = {
             "name": variety.name,
             "description": {
-                "value": variety.description or "",
+                "value": description_with_ref,
                 "format": "default",
             },
         }
 
-        # Core plant_type fields (built into FarmOS)
         if variety.days_to_harvest_min is not None:
             attributes["maturity_days"] = variety.days_to_harvest_min
-
-        # Store full reference data in the API-only 'data' field as JSON
-        reference_data = variety.to_dict()
-        attributes["data"] = json.dumps(reference_data)
 
         payload = {
             "data": {
@@ -228,18 +232,22 @@ class FarmOSClient:
         """Update an existing plant_type taxonomy term."""
         import json
 
+        reference_json = json.dumps(variety.to_dict())
+        description_text = variety.description or variety.name
+        description_with_ref = (
+            f"{description_text}\n\n"
+            f"<!-- agribuddy_ref: {reference_json} -->"
+        )
+
         attributes = {
             "name": variety.name,
             "description": {
-                "value": variety.description or "",
+                "value": description_with_ref,
                 "format": "default",
             },
         }
         if variety.days_to_harvest_min is not None:
             attributes["maturity_days"] = variety.days_to_harvest_min
-
-        reference_data = variety.to_dict()
-        attributes["data"] = json.dumps(reference_data)
 
         payload = {
             "data": {
