@@ -473,7 +473,14 @@ def _register_services(hass: HomeAssistant) -> None:
 
                 is_canonical = "source" in species_data and "variety_id" in species_data
                 if is_canonical:
-                    variety = PlantVariety.from_dict(species_data)
+                    # The card's normalized format uses common_name/variety_name
+                    # but PlantVariety expects 'name'. Map before constructing.
+                    sd = dict(species_data)
+                    if "name" not in sd:
+                        sd["name"] = sd.get("common_name") or sd.get("variety_name", "")
+                    if "category" not in sd:
+                        sd["category"] = sd.get("category", "")
+                    variety = PlantVariety.from_dict(sd)
                     result = await farmos.register_plant(
                         variety=variety,
                         plant_name=call.data[ATTR_PLANT_NAME],
