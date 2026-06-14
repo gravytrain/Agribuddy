@@ -2,27 +2,46 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect to Verdantly (via RapidAPI)",
-        "description": "\u26a0\ufe0f FREE TIER LIMIT: Only **25 API calls per month**.\n\nAgribuddy caches search results for 30 days and stores each plant's full data locally, so each unique plant search costs just 1 call and opening an already-added plant costs nothing. Still, plan your searches.\n\nSteps to get your API key:\n1. Visit {signup_url}\n2. Sign up for RapidAPI (free) and subscribe to the Verdantly Gardening API (free Basic plan)\n3. Copy your X-RapidAPI-Key from the dashboard and paste below.\n\nYour key is NOT validated here (validation would burn 1 of your 25 monthly calls). The first plant search will surface any auth issues.",
+        "title": "Plant API (optional)",
+        "description": "Agribuddy now uses a built-in plant variety database (1,900+ varieties). The Verdantly API key is optional — only needed if you want to fall back to their API for varieties not in the database.\n\nLeave blank to skip.",
         "data": {
-          "api_key": "RapidAPI key (X-RapidAPI-Key header value)"
+          "api_key": "RapidAPI key (optional)"
         }
       },
       "weather": {
         "title": "Pick your weather entity",
-        "description": "Choose any HA entity that surfaces current weather. Agribuddy reads its state for rain/snow detection and its attributes for frost forecasting. Doesn't have to be a `weather.*` entity \u2014 a sensor or template entity works too.",
+        "description": "Choose any HA entity that surfaces current weather. Agribuddy reads its state for rain/snow detection and its attributes for frost forecasting.",
         "data": {
           "weather_entity": "Weather entity"
+        }
+      },
+      "farmos": {
+        "title": "FarmOS Integration (optional)",
+        "description": "Connect to a FarmOS instance to sync plants and events. Plants added in Agribuddy will be registered as plant assets in FarmOS.\n\nLeave all fields blank to skip.",
+        "data": {
+          "farmos_url": "FarmOS URL (e.g. http://192.168.1.218:8089)",
+          "farmos_username": "FarmOS username",
+          "farmos_password": "FarmOS password"
+        }
+      },
+      "ai_provider": {
+        "title": "AI Fallback Provider (optional)",
+        "description": "Configure an OpenAI-compatible API as a fallback for plant varieties not found in the built-in database. Any endpoint that supports chat completions works (OpenAI, Ollama, LM Studio, etc.).\n\nLeave blank to skip.",
+        "data": {
+          "ai_api_base": "API base URL (e.g. http://localhost:11434/v1)",
+          "ai_api_key": "API key (or 'ollama' for local Ollama)",
+          "ai_model": "Model name (e.g. llama3, gpt-4o-mini)"
         }
       }
     },
     "error": {
-      "invalid_auth": "Verdantly rejected this key. Make sure you're subscribed to the Verdantly Gardening API on RapidAPI and copied the X-RapidAPI-Key exactly.",
-      "cannot_connect": "Cannot reach RapidAPI (verdantly-gardening-api.p.rapidapi.com). Check your internet connection.",
-      "rate_limited": "RapidAPI rate limit hit \u2014 you may be out of the 25-calls-per-month free tier quota. Wait for the monthly reset or upgrade your RapidAPI subscription.",
-      "api_error": "Verdantly returned an error. Check your key and try again later.",
+      "invalid_auth": "Verdantly rejected this key.",
+      "cannot_connect": "Cannot reach the API endpoint.",
+      "rate_limited": "RapidAPI rate limit hit.",
+      "api_error": "API returned an error.",
       "api_key_empty": "API key cannot be empty.",
-      "unknown": "Unexpected error \u2014 see HA logs (search 'agribuddy') for details."
+      "farmos_connect_failed": "Could not connect to FarmOS. Check the URL, username, and password. Make sure the Simple OAuth Password Grant module is enabled.",
+      "unknown": "Unexpected error — see HA logs for details."
     },
     "abort": {
       "already_configured": "Agribuddy is already configured."
@@ -33,8 +52,14 @@
       "init": {
         "title": "Agribuddy options",
         "data": {
-          "update_interval": "Update interval (minutes \u2014 default 1440, i.e. 24h)",
-          "weather_entity": "Weather entity"
+          "update_interval": "Update interval (minutes)",
+          "weather_entity": "Weather entity",
+          "farmos_url": "FarmOS URL",
+          "farmos_username": "FarmOS username",
+          "farmos_password": "FarmOS password",
+          "ai_api_base": "AI API base URL",
+          "ai_api_key": "AI API key",
+          "ai_model": "AI model name"
         }
       }
     }

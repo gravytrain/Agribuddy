@@ -7,6 +7,12 @@ DOMAIN = "agribuddy"
 CONF_API_KEY = "api_key"
 CONF_WEATHER_ENTITY = "weather_entity"
 CONF_UPDATE_INTERVAL = "update_interval"
+CONF_AI_API_BASE = "ai_api_base"
+CONF_AI_API_KEY = "ai_api_key"
+CONF_AI_MODEL = "ai_model"
+CONF_FARMOS_URL = "farmos_url"
+CONF_FARMOS_USERNAME = "farmos_username"
+CONF_FARMOS_PASSWORD = "farmos_password"
 
 # ── Defaults ───────────────────────────────────────────────────────────────
 # 24-hour interval. The coordinator only reads weather entity values —

@@ -834,42 +834,54 @@ class PlantStore:
         p["events_sorted"] = sorted_evts
         p["recent_events"] = sorted_evts[:100]
 
-        # ── Verdantly-derived convenience fields ──────────────────────────
-        # `species_data` is the raw Verdantly variety object (one element from
-        # the search response's `data` array). It carries everything we need
-        # inline — growingRequirements.*, species.*, taxonomy.*, ecology.*,
-        # lifecycleMilestones.*, safety.toxicity.*, growthDetails.*, etc.
-        # Below we flatten it into top-level plant attributes so the card and
-        # sensors don't have to dig through the nested shape.
+        # ── Species-derived convenience fields ────────────────────────────
+        # `species_data` may be either:
+        #   - New canonical schema (flat dict from PlantVariety.to_dict())
+        #     identified by the presence of a `source` key
+        #   - Legacy Verdantly nested object (growingRequirements.*, species.*, etc.)
+        # We handle both shapes during the transition period.
         sd = p.get("species_data") or {}
         ov = p.get("user_overrides") or {}
 
-        # Nested-section shorthand for the most-referenced sub-objects
-        gr = sd.get("growingRequirements") or {}
-        gd = sd.get("growthDetails") or {}
-        lm = sd.get("lifecycleMilestones") or {}
-        sp = sd.get("species") or {}
-        tx = sp.get("taxonomy") or {}
-        eco = sd.get("ecology") or {}
-        safety = sd.get("safety") or {}
-        tox = safety.get("toxicity") or {}
+        is_canonical = "source" in sd and "variety_id" in sd
+
+        if is_canonical:
+            # ── New canonical schema path (flat dict) ─────────────────────
+            gr = {}
+            gd = {}
+            lm = {}
+            sp = {}
+            tx = {}
+            eco = {}
+            safety = {}
+            tox = sd.get("toxicity") or {}
+        else:
+            # ── Legacy Verdantly nested path ──────────────────────────────
+            gr = sd.get("growingRequirements") or {}
+            gd = sd.get("growthDetails") or {}
+            lm = sd.get("lifecycleMilestones") or {}
+            sp = sd.get("species") or {}
+            tx = sp.get("taxonomy") or {}
+            eco = sd.get("ecology") or {}
+            safety = sd.get("safety") or {}
+            tox = safety.get("toxicity") or {}
 
         def pick(key, *path_or_default, default=None):
             """Return the user override for `key` if set, otherwise look up
-            from a dotted path inside `sd`. Empty / None / empty-list always
-            fall through to the default.
-
-            Two call styles supported:
-              pick("common_name", default="")             — only override + flat lookup
-              pick("light_requirements", gr, "sunlightRequirement", default="")
-                — override, else gr["sunlightRequirement"], else default
+            from species_data. Handles both canonical (flat) and legacy (nested).
             """
             # 1. user override wins
             if key in ov:
                 v = ov[key]
                 if v not in (None, "", []):
                     return v
-            # 2. nested path lookup (if a section dict was passed)
+            # 2. canonical flat lookup (new schema has all fields at top level)
+            if is_canonical:
+                v = sd.get(key)
+                if v not in (None, "", []):
+                    return v
+                return default
+            # 3. nested path lookup for legacy data (if a section dict was passed)
             if path_or_default and isinstance(path_or_default[0], dict):
                 section = path_or_default[0]
                 field = path_or_default[1] if len(path_or_default) > 1 else key
@@ -877,47 +889,48 @@ class PlantStore:
                 if v not in (None, ""):
                     return v
                 return default
-            # 3. flat lookup on sd
+            # 4. flat lookup on sd (legacy fallback)
             v = sd.get(key)
             if v not in (None, "", []):
                 return v
             return default
 
         # ── Naming ────────────────────────────────────────────────────────
-        # Verdantly returns common name + scientific name under `species`,
-        # PLUS a per-variety `name` field at the top level (often the
-        # cultivar/variety name like "Abe Lincoln Original Tomato").
-        # We prefer the variety name when present since it's more specific.
-        species_common = sp.get("commonName") or ""
-        species_sci = sp.get("scientificName") or ""
-        variety_name = sd.get("name") or ""
+        if is_canonical:
+            variety_name = sd.get("name") or ""
+            species_sci = sd.get("scientific_name") or ""
+            species_common = variety_name
+        else:
+            species_common = sp.get("commonName") or ""
+            species_sci = sp.get("scientificName") or ""
+            variety_name = sd.get("name") or ""
+
         p["common_name"] = (
             ov.get("common_name") or variety_name or species_common or species_sci
         )
         p["scientific_name"] = ov.get("scientific_name") or species_sci or ""
         p["common_names"] = [p["common_name"]] if p["common_name"] else []
-        # Variety / cultivar name surfaced for the trading card subtitle
         p["variety_name"] = variety_name or ""
-        # Symbol field kept for backward compat with the v0.3.0 card markup
-        # (used to hold APIFarmer's short code). Empty for Verdantly.
         p["symbol"] = ""
 
         # ── Light requirements ────────────────────────────────────────────
-        # Verdantly's `growingRequirements.sunlightRequirement` is a string
-        # like "Full Sun", "Partial Shade". Used directly with no mapping.
-        p["light_requirements"] = (
-            ov.get("light_requirements") or gr.get("sunlightRequirement") or ""
-        )
+        if is_canonical:
+            p["light_requirements"] = (
+                ov.get("light_requirements") or sd.get("sun_requirement") or ""
+            )
+        else:
+            p["light_requirements"] = (
+                ov.get("light_requirements") or gr.get("sunlightRequirement") or ""
+            )
         p["sunlight"] = [p["light_requirements"]] if p["light_requirements"] else []
 
         # ── Water needs (categorical) + min/max day projection ────────────
-        # Verdantly's `growingRequirements.waterRequirement` is a categorical
-        # string ("Low" / "Moderate" / "High"). We project to a (min, max)
-        # days range so the existing needs_water plumbing keeps working.
-        # User can override watering_min_days / watering_max_days per plant.
-        water_req_raw = ov.get("water_use") or gr.get("waterRequirement") or ""
+        if is_canonical:
+            water_req_raw = ov.get("water_use") or sd.get("water_requirement") or ""
+        else:
+            water_req_raw = ov.get("water_use") or gr.get("waterRequirement") or ""
         p["water_use"] = water_req_raw
-        p["water_requirement"] = water_req_raw  # alias for the new API name
+        p["water_requirement"] = water_req_raw
         default_min, default_max = _water_requirement_to_day_range(water_req_raw)
         ov_min = ov.get("watering_min_days")
         ov_max = ov.get("watering_max_days")
@@ -941,9 +954,13 @@ class PlantStore:
             p["watering_benchmark_value"] = None
         p["watering_benchmark_unit"] = "days"
 
-        # ── Hardiness zones (now back, from growingRequirements) ──────────
-        hz_min = pick("hardiness_zone_min", gr, "minGrowingZone")
-        hz_max = pick("hardiness_zone_max", gr, "maxGrowingZone")
+        # ── Hardiness zones ───────────────────────────────────────────────
+        if is_canonical:
+            hz_min = pick("usda_zone_min")
+            hz_max = pick("usda_zone_max")
+        else:
+            hz_min = pick("hardiness_zone_min", gr, "minGrowingZone")
+            hz_max = pick("hardiness_zone_max", gr, "maxGrowingZone")
         p["hardiness_zone_min"] = hz_min
         p["hardiness_zone_max"] = hz_max
         # Pre-composed range string for display
@@ -957,18 +974,28 @@ class PlantStore:
             p["hardiness_zone_range"] = ""
 
         # ── Soil preference, spacing, growth period, care instructions ────
-        p["soil_preference"] = pick("soil_preference", gr, "soilPreference", default="")
-        p["spacing_requirement"] = pick(
-            "spacing_requirement", gr, "spacingRequirement", default=""
-        )
-        p["growth_period"] = pick("growth_period", gd, "growthPeriod", default="")
-        p["care_instructions"] = pick(
-            "care_instructions", gr, "careInstructions", default=""
-        )
+        if is_canonical:
+            p["soil_preference"] = pick("soil_type", default="")
+            p["spacing_requirement"] = pick("plant_spacing", default="")
+            p["growth_period"] = pick("growing_season", default="")
+            p["care_instructions"] = pick("sowing_method", default="")
+        else:
+            p["soil_preference"] = pick("soil_preference", gr, "soilPreference", default="")
+            p["spacing_requirement"] = pick(
+                "spacing_requirement", gr, "spacingRequirement", default=""
+            )
+            p["growth_period"] = pick("growth_period", gd, "growthPeriod", default="")
+            p["care_instructions"] = pick(
+                "care_instructions", gr, "careInstructions", default=""
+            )
 
         # ── pH range ──────────────────────────────────────────────────────
-        ph_min = pick("soil_ph_min", eco, "soilPhMin")
-        ph_max = pick("soil_ph_max", eco, "soilPhMax")
+        if is_canonical:
+            ph_min = pick("soil_ph_min")
+            ph_max = pick("soil_ph_max")
+        else:
+            ph_min = pick("soil_ph_min", eco, "soilPhMin")
+            ph_max = pick("soil_ph_max", eco, "soilPhMax")
         p["soil_ph_min"] = ph_min
         p["soil_ph_max"] = ph_max
         if ph_min is not None and ph_max is not None and ph_min != ph_max:
@@ -981,8 +1008,12 @@ class PlantStore:
             p["soil_ph_range"] = ""
 
         # ── Harvest range (days to harvest) ───────────────────────────────
-        h_min = pick("days_to_harvest_min", lm, "daysToHarvestMin")
-        h_max = pick("days_to_harvest_max", lm, "daysToHarvestMax")
+        if is_canonical:
+            h_min = pick("days_to_harvest_min")
+            h_max = pick("days_to_harvest_max")
+        else:
+            h_min = pick("days_to_harvest_min", lm, "daysToHarvestMin")
+            h_max = pick("days_to_harvest_max", lm, "daysToHarvestMax")
         p["days_to_harvest_min"] = h_min
         p["days_to_harvest_max"] = h_max
         if h_min is not None and h_max is not None and h_min != h_max:
@@ -1025,19 +1056,26 @@ class PlantStore:
         else:
             p["toxicity_display"] = "Non-toxic"
 
-        # ── Invasive alert (ecology.isInvasive can be null/true/false) ────
-        # Override allowed so the user can flag a plant invasive themselves.
+        # ── Invasive alert ────────────────────────────────────────────────
         if "invasive_alert" in ov:
             p["invasive_alert"] = bool(ov["invasive_alert"])
+        elif is_canonical:
+            p["invasive_alert"] = bool(sd.get("is_invasive"))
         else:
             p["invasive_alert"] = bool(eco.get("isInvasive"))
 
         # ── Taxonomy footer (family | genus | species) ────────────────────
-        p["taxonomy_family"] = tx.get("family") or ""
-        p["taxonomy_genus"] = tx.get("genus") or ""
-        p["taxonomy_species"] = tx.get("species") or ""
-        # Compose a "family | genus | species" display string, skipping
-        # empty parts so we don't show "Solanaceae | Solanum | "
+        if is_canonical:
+            # Canonical schema stores scientific_name; parse genus from it
+            sci = sd.get("scientific_name") or ""
+            parts = sci.split() if sci else []
+            p["taxonomy_family"] = sd.get("category") or ""
+            p["taxonomy_genus"] = parts[0] if parts else ""
+            p["taxonomy_species"] = parts[1] if len(parts) > 1 else ""
+        else:
+            p["taxonomy_family"] = tx.get("family") or ""
+            p["taxonomy_genus"] = tx.get("genus") or ""
+            p["taxonomy_species"] = tx.get("species") or ""
         tax_parts = [
             t
             for t in (p["taxonomy_family"], p["taxonomy_genus"], p["taxonomy_species"])
@@ -1046,12 +1084,14 @@ class PlantStore:
         p["taxonomy_display"] = " | ".join(tax_parts)
 
         # ── Image ─────────────────────────────────────────────────────────
-        # Verdantly puts the image URL at the top level. User override wins.
-        p["image_url"] = ov.get("image_url") or sd.get("imageUrl") or None
+        if is_canonical:
+            p["image_url"] = ov.get("image_url") or sd.get("image_url") or None
+        else:
+            p["image_url"] = ov.get("image_url") or sd.get("imageUrl") or None
         p["image_attribution"] = sd.get("imageAttribution") or ""
         p["image_license"] = sd.get("imageLicense") or ""
 
-        # ── Description (replaced by care_instructions on the card) ───────
+        # ── Description ───────────────────────────────────────────────────
         p["description"] = ov.get("description") or sd.get("description") or ""
 
         # ── Fields we no longer surface but keep present for back-compat ──

@@ -35,6 +35,8 @@ from .const import (
     CONF_WEATHER_ENTITY,
     DOMAIN,
 )
+from .providers import PlantResolver
+from .providers.base import PlantVariety
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,6 +102,13 @@ def _get_api(hass: HomeAssistant) -> VerdantlyApiClient | None:
     for v in hass.data.get(DOMAIN, {}).values():
         if isinstance(v, dict) and "api" in v:
             return v["api"]
+    return None
+
+
+def _get_resolver(hass: HomeAssistant) -> PlantResolver | None:
+    for v in hass.data.get(DOMAIN, {}).values():
+        if isinstance(v, dict) and "resolver" in v:
+            return v["resolver"]
     return None
 
 
@@ -308,76 +317,103 @@ class AgribuddySearchView(HomeAssistantView):
 
     async def get(self, request):
         q = request.rel_url.query.get("q", "").strip()
-        # APIFarmer doesn't support a state filter — older cards may still send
-        # the param. We accept it for compat but ignore it. The cache key
-        # likewise no longer includes state.
+        # Legacy state param accepted for compat but ignored.
         state_raw = request.rel_url.query.get("state", "").strip().upper()
         if state_raw:
             _LOGGER.debug(
-                "Agribuddy: search received state=%r — ignored (APIFarmer has no state filter)",
+                "Agribuddy: search received state=%r — ignored",
                 state_raw,
             )
-        state = None  # Always None for APIFarmer
 
         if not q:
             return _json(
                 {"error": "missing_query", "message": "Provide a ?q= search term."}, 400
             )
-        api = _get_api(self._hass)
-        if api is None:
-            return _json(
-                {
-                    "error": "api_unavailable",
-                    "message": "Agribuddy not ready — complete the integration setup wizard first.",
-                },
-                503,
-            )
 
+        # Check search cache first
         caches = _get_caches(self._hass)
         cache_key = q.lower()
         if caches is not None:
             cached = caches["search_cache"].get(cache_key)
             if cached:
-                ts, results, url_used = cached
+                ts, results, source = cached
                 if time.time() - ts < SEARCH_CACHE_TTL_SECONDS:
                     _LOGGER.debug(
-                        "Agribuddy: search '%s' served from cache (%d results)",
+                        "Agribuddy: search '%s' served from cache (%d results, source=%s)",
                         q,
                         len(results),
+                        source,
                     )
                     return _json(
                         {
                             "results": results,
-                            "_testing_url": url_used,
+                            "_source": source,
                             "_from_cache": True,
                             "_backend_version": _HTTP_API_VERSION,
                         }
                     )
 
+        # Primary path: use the PlantResolver (CSV → AI fallback)
+        resolver = _get_resolver(self._hass)
+        if resolver is not None:
+            try:
+                varieties = await resolver.search(q)
+                if varieties:
+                    cleaned = [_normalize_plant_variety(v) for v in varieties]
+                    source = varieties[0].source if varieties else "resolver"
+                    _LOGGER.info(
+                        "Agribuddy: /search_plants q=%r → %d results (source=%s)",
+                        q,
+                        len(cleaned),
+                        source,
+                    )
+                    if caches is not None:
+                        caches["search_cache"][cache_key] = (time.time(), cleaned, source)
+                    return _json(
+                        {
+                            "results": cleaned,
+                            "_source": source,
+                            "_from_cache": False,
+                            "_backend_version": _HTTP_API_VERSION,
+                        }
+                    )
+            except Exception as err:
+                _LOGGER.warning(
+                    "Agribuddy: resolver search for '%s' failed: %s", q, err
+                )
+
+        # Legacy fallback: Verdantly API (only if resolver found nothing)
+        api = _get_api(self._hass)
+        if api is None:
+            return _json(
+                {
+                    "error": "no_results",
+                    "message": f"No results found for '{q}'. AI fallback not configured.",
+                    "results": [],
+                },
+                200,
+            )
+
         try:
-            results_raw, url_used = await api.search_plants(q, state=state)
+            results_raw, url_used = await api.search_plants(q, state=None)
             cleaned = [
                 _normalize_verdantly_variety(r)
                 for r in results_raw
                 if isinstance(r, dict)
             ]
-            _LOGGER.warning(
-                "Agribuddy: /search_plants q=%r → %d raw, %d cleaned (URL: %s)",
+            _LOGGER.info(
+                "Agribuddy: /search_plants q=%r → %d results (source=verdantly, URL: %s)",
                 q,
                 len(results_raw),
-                len(cleaned),
                 url_used,
             )
             if caches is not None:
-                caches["search_cache"][cache_key] = (time.time(), cleaned, url_used)
+                caches["search_cache"][cache_key] = (time.time(), cleaned, "verdantly")
             return _json(
                 {
                     "results": cleaned,
-                    "_testing_url": url_used,
+                    "_source": "verdantly",
                     "_from_cache": False,
-                    # Backend version marker — lets the card prove which backend
-                    # actually handled the request. Stale http_api.py files won't
-                    # set this and the card warns in console.
                     "_backend_version": _HTTP_API_VERSION,
                 }
             )
@@ -459,6 +495,100 @@ def _normalize_verdantly_variety(r: dict) -> dict:
 # Legacy aliases — older code paths reference these names.
 _normalize_apifarmer_species = _normalize_verdantly_variety
 _normalize_flora_species = _normalize_verdantly_variety
+
+
+def _normalize_plant_variety(v: PlantVariety) -> dict:
+    """Convert a canonical PlantVariety into the flat dict shape the card expects.
+
+    This replaces _normalize_verdantly_variety for the new provider architecture.
+    The card reads these top-level keys from search results.
+    """
+    # Build the pH range display
+    ph_range = ""
+    if v.soil_ph_min is not None and v.soil_ph_max is not None and v.soil_ph_min != v.soil_ph_max:
+        ph_range = f"{v.soil_ph_min}-{v.soil_ph_max}"
+    elif v.soil_ph_min is not None:
+        ph_range = str(v.soil_ph_min)
+
+    # Build the harvest range display
+    harvest_range = ""
+    if v.days_to_harvest_min is not None and v.days_to_harvest_max is not None:
+        if v.days_to_harvest_min != v.days_to_harvest_max:
+            harvest_range = f"{v.days_to_harvest_min}-{v.days_to_harvest_max} days"
+        else:
+            harvest_range = f"{v.days_to_harvest_min} days"
+    elif v.days_to_harvest_min is not None:
+        harvest_range = f"{v.days_to_harvest_min} days"
+
+    # Hardiness zone range
+    hz_range = ""
+    if v.usda_zone_min is not None and v.usda_zone_max is not None and v.usda_zone_min != v.usda_zone_max:
+        hz_range = f"{v.usda_zone_min}–{v.usda_zone_max}"
+    elif v.usda_zone_min is not None:
+        hz_range = str(v.usda_zone_min)
+
+    return {
+        # Identifiers — card looks for these under multiple names
+        "species_id": v.variety_id,
+        "id": v.variety_id,
+        "variety_id": v.variety_id,
+        # Names
+        "common_name": v.name,
+        "common_names": [v.name] if v.name else [],
+        "variety_name": v.name,
+        "scientific_name": v.scientific_name,
+        # Growing requirements
+        "light_requirements": v.sun_requirement,
+        "water_use": v.water_requirement,
+        "water_requirement": v.water_requirement,
+        "soil_preference": v.soil_type,
+        "soil_ph_min": v.soil_ph_min,
+        "soil_ph_max": v.soil_ph_max,
+        "soil_ph_range": ph_range,
+        "plant_spacing": v.plant_spacing,
+        "spacing_requirement": v.plant_spacing,
+        "plant_height": v.plant_height,
+        # Hardiness zones
+        "hardiness_zone_min": v.usda_zone_min,
+        "hardiness_zone_max": v.usda_zone_max,
+        "hardiness_zone_range": hz_range,
+        # Harvest
+        "days_to_harvest_min": v.days_to_harvest_min,
+        "days_to_harvest_max": v.days_to_harvest_max,
+        "harvest_range": harvest_range,
+        # Growing info
+        "growing_season": v.growing_season,
+        "sowing_method": v.sowing_method,
+        "growing_difficulty": v.growing_difficulty,
+        "is_container_friendly": v.is_container_friendly,
+        # Threats
+        "disease_resistance": v.disease_resistance,
+        "common_pests": v.common_pests,
+        "common_diseases": v.common_diseases,
+        # Safety
+        "invasive_alert": v.is_invasive,
+        "toxicity": v.toxicity,
+        # Characteristics
+        "category": v.category,
+        "color": v.color,
+        "size": v.size,
+        "shape": v.shape,
+        "flavor_profile": v.flavor_profile,
+        "culinary_uses": v.culinary_uses,
+        "is_heirloom": v.is_heirloom,
+        "is_hybrid": v.is_hybrid,
+        # Media
+        "image_url": v.image_url,
+        # Description
+        "description": v.description,
+        # Metadata
+        "source": v.source,
+        "source_url": v.source_url,
+        "confidence": v.confidence,
+        # Back-compat fields the card may reference
+        "symbol": "",
+        "api_provider": v.source,
+    }
 
 
 class AgribuddySpeciesView(HomeAssistantView):

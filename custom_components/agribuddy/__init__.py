@@ -20,6 +20,9 @@ from .api import (
     VerdantlyRateLimitError,
 )
 from .api_usage import ApiUsageTracker
+from .farmos_client import FarmOSClient
+from .providers import CsvProvider, PlantResolver
+from .providers.ai_provider import AiProvider
 from .const import (
     ATTR_EVENT_DATE,
     ATTR_EVENT_ID,
@@ -36,7 +39,16 @@ from .const import (
     CONF_WEATHER_ENTITY,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
+    EVENT_BLIGHT,
+    EVENT_DEAD,
+    EVENT_FERTILIZED,
+    EVENT_HARVESTED,
+    EVENT_OTHER,
+    EVENT_PEST,
     EVENT_PLANTED,
+    EVENT_SPROUTED,
+    EVENT_TRANSPLANTED,
+    EVENT_WATERED,
     MANUAL_EVENT_TYPES,
     SERVICE_ADD_PLANT,
     SERVICE_LOG_EVENT,
@@ -145,6 +157,77 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         tracker.current_count(),
     )
 
+    # ── Plant reference data providers ────────────────────────────────────
+    from .const import CONF_AI_API_BASE, CONF_AI_API_KEY, CONF_AI_MODEL
+
+    providers: list = []
+
+    # Primary: local CSV dataset (fast, free, authoritative)
+    csv_provider = CsvProvider()
+    csv_provider.load()
+    providers.append(csv_provider)
+
+    # Fallback: AI provider (if configured)
+    ai_base = entry.options.get(CONF_AI_API_BASE, entry.data.get(CONF_AI_API_BASE, ""))
+    ai_key = entry.options.get(CONF_AI_API_KEY, entry.data.get(CONF_AI_API_KEY, ""))
+    ai_model = entry.options.get(CONF_AI_MODEL, entry.data.get(CONF_AI_MODEL, ""))
+    if ai_base and ai_key and ai_model:
+        ai_provider = AiProvider(
+            api_base=ai_base,
+            api_key=ai_key,
+            model=ai_model,
+            session=session,
+        )
+        providers.append(ai_provider)
+        _LOGGER.info("Agribuddy: AI fallback provider configured (model=%s)", ai_model)
+    else:
+        _LOGGER.info(
+            "Agribuddy: AI fallback provider not configured — "
+            "only CSV dataset will be used for plant searches"
+        )
+
+    resolver = PlantResolver(providers=providers)
+    _LOGGER.info(
+        "Agribuddy: PlantResolver initialized with providers: %s",
+        resolver.provider_names,
+    )
+
+    # ── FarmOS integration (optional) ─────────────────────────────────────
+    from .const import CONF_FARMOS_URL, CONF_FARMOS_USERNAME, CONF_FARMOS_PASSWORD
+
+    farmos_url = entry.options.get(
+        CONF_FARMOS_URL, entry.data.get(CONF_FARMOS_URL, "")
+    )
+    farmos_user = entry.options.get(
+        CONF_FARMOS_USERNAME, entry.data.get(CONF_FARMOS_USERNAME, "")
+    )
+    farmos_pass = entry.options.get(
+        CONF_FARMOS_PASSWORD, entry.data.get(CONF_FARMOS_PASSWORD, "")
+    )
+    farmos_client: FarmOSClient | None = None
+    if farmos_url and farmos_user and farmos_pass:
+        farmos_client = FarmOSClient(
+            base_url=farmos_url,
+            username=farmos_user,
+            password=farmos_pass,
+            session=session,
+        )
+        try:
+            await farmos_client.authenticate()
+            farm_info = await farmos_client.test_connection()
+            _LOGGER.info(
+                "Agribuddy: FarmOS connected — farm='%s', url='%s'",
+                farm_info.get("name", "unknown"),
+                farmos_url,
+            )
+        except Exception as err:
+            _LOGGER.warning(
+                "Agribuddy: FarmOS connection failed (will retry on use): %s", err
+            )
+            # Don't fail setup — FarmOS sync is optional
+    else:
+        _LOGGER.info("Agribuddy: FarmOS integration not configured")
+
     store = PlantStore(hass)
     await store.async_load()
 
@@ -169,14 +252,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data[DOMAIN][entry.entry_id] = {
         "api": api,
+        "resolver": resolver,
+        "farmos": farmos_client,
         "store": store,
         "coordinator": coord,
         "usage": tracker,
-        # In-memory caches to minimize Verdantly API calls. The species
-        # cache is also mirrored on disk per-plant inside the store so
-        # plants always have their data even after a restart.
-        "species_cache": {},  # species_id (str) → full detail dict
-        "search_cache": {},  # query (str)     → (timestamp, results list)
+        # In-memory caches — search cache now backed by resolver, but kept
+        # for backward compat with the status endpoint and legacy paths.
+        "species_cache": {},
+        "search_cache": {},
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -222,6 +306,14 @@ def _get_caches(hass: HomeAssistant) -> dict | None:
     for v in hass.data.get(DOMAIN, {}).values():
         if isinstance(v, dict) and "species_cache" in v:
             return v
+    return None
+
+
+def _get_farmos(hass: HomeAssistant):
+    """Return the FarmOSClient instance if configured, or None."""
+    for v in hass.data.get(DOMAIN, {}).values():
+        if isinstance(v, dict) and "farmos" in v:
+            return v["farmos"]
     return None
 
 
@@ -372,6 +464,37 @@ def _register_services(hass: HomeAssistant) -> None:
                 plant["id"],
                 err,
             )
+
+        # ── Sync to FarmOS (non-blocking, best-effort) ────────────────────
+        farmos = _get_farmos(hass)
+        if farmos and species_data:
+            try:
+                from .providers.base import PlantVariety
+
+                is_canonical = "source" in species_data and "variety_id" in species_data
+                if is_canonical:
+                    variety = PlantVariety.from_dict(species_data)
+                    result = await farmos.register_plant(
+                        variety=variety,
+                        plant_name=call.data[ATTR_PLANT_NAME],
+                        location_name=call.data.get(ATTR_LOCATION, ""),
+                    )
+                    _LOGGER.info(
+                        "Agribuddy: synced to FarmOS — plant_type_id=%s, asset_id=%s",
+                        result.get("plant_type_id"),
+                        result.get("asset_id"),
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Agribuddy: skipping FarmOS sync — species_data is legacy format"
+                    )
+            except Exception as err:
+                _LOGGER.warning(
+                    "Agribuddy: FarmOS sync failed for plant '%s': %s (plant still added locally)",
+                    call.data[ATTR_PLANT_NAME],
+                    err,
+                )
+
         await _refresh_all(hass)
         _fire_data_changed(hass, kind="plant_added", plant_id=plant["id"])
 
@@ -406,6 +529,39 @@ def _register_services(hass: HomeAssistant) -> None:
                 call.data[ATTR_PLANT_ID],
             )
             return
+
+        # ── Sync event to FarmOS log (best-effort) ───────────────────────
+        farmos = _get_farmos(hass)
+        if farmos:
+            event_to_farmos_log_type = {
+                EVENT_WATERED: "activity",
+                EVENT_FERTILIZED: "input",
+                EVENT_HARVESTED: "harvest",
+                EVENT_PLANTED: "seeding",
+                EVENT_TRANSPLANTED: "activity",
+                EVENT_PEST: "observation",
+                EVENT_BLIGHT: "observation",
+                EVENT_SPROUTED: "observation",
+                EVENT_DEAD: "observation",
+                EVENT_OTHER: "observation",
+            }
+            farmos_log_type = event_to_farmos_log_type.get(
+                call.data[ATTR_EVENT_TYPE], "observation"
+            )
+            try:
+                await farmos.create_log(
+                    log_type=farmos_log_type,
+                    name=f"{call.data[ATTR_EVENT_TYPE]} — {call.data[ATTR_PLANT_ID][:8]}",
+                    notes=call.data.get(ATTR_EVENT_NOTE, ""),
+                    timestamp=d.isoformat() if d else None,
+                )
+            except Exception as err:
+                _LOGGER.debug(
+                    "Agribuddy: FarmOS log sync failed for event '%s': %s",
+                    call.data[ATTR_EVENT_TYPE],
+                    err,
+                )
+
         await _refresh_all(hass)
         _fire_data_changed(
             hass,
