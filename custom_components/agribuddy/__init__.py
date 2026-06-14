@@ -539,6 +539,8 @@ def _register_services(hass: HomeAssistant) -> None:
 
         # ── Sync event to FarmOS log (best-effort) ───────────────────────
         farmos = _get_farmos(hass)
+        if not farmos:
+            _LOGGER.warning("Agribuddy: FarmOS client not available for event sync")
         if farmos:
             event_to_farmos_log_type = {
                 EVENT_WATERED: "activity",
@@ -563,7 +565,7 @@ def _register_services(hass: HomeAssistant) -> None:
                     timestamp=d.isoformat() if d else None,
                 )
             except Exception as err:
-                _LOGGER.debug(
+                _LOGGER.warning(
                     "Agribuddy: FarmOS log sync failed for event '%s': %s",
                     call.data[ATTR_EVENT_TYPE],
                     err,
