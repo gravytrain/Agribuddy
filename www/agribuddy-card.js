@@ -1386,6 +1386,7 @@ class AgribuddyCard extends HTMLElement {
   /* ── Live update ─────────────────────────────────────────────────────── */
 
   _updateLive() {
+    if (this.shadowRoot.querySelector(".overlay")) return;
     const now = Date.now();
     if (!this._lastLiveRender || now - this._lastLiveRender > 5000) {
       this._lastLiveRender = now;
