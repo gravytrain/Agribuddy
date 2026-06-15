@@ -431,11 +431,14 @@ class AgribuddyCard extends HTMLElement {
   /* ── Data fetching ───────────────────────────────────────────────────── */
 
   async _apiFetch(path, opts = {}) {
-    const resp = await fetch(`${API_BASE}${path}`, {
-      headers: { Authorization: `Bearer ${this._hass.auth.data.access_token}`, "Content-Type": "application/json" },
-      ...opts,
-    });
-    const data = await resp.json();
+    const url = `${API_BASE}${path}`;
+    const fetchOpts = { ...opts };
+    if (!fetchOpts.headers) fetchOpts.headers = {};
+    fetchOpts.headers["Content-Type"] = "application/json";
+    const resp = await this._hass.fetchWithAuth(url, fetchOpts);
+    const text = await resp.text();
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch { data = {}; }
     return { status: resp.status, data };
   }
 
