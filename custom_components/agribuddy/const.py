@@ -1,63 +1,19 @@
-"""Constants for the Agribuddy integration (Verdantly Gardening API edition,
-served via RapidAPI)."""
+"""Constants for the Agribuddy integration."""
 
 DOMAIN = "agribuddy"
 
 # ── Config keys ────────────────────────────────────────────────────────────
-CONF_API_KEY = "api_key"
+CONF_DAYSTROM_URL = "daystrom_url"
+CONF_DAYSTROM_API_KEY = "daystrom_api_key"
 CONF_WEATHER_ENTITY = "weather_entity"
 CONF_UPDATE_INTERVAL = "update_interval"
 CONF_AI_API_BASE = "ai_api_base"
 CONF_AI_API_KEY = "ai_api_key"
 CONF_AI_MODEL = "ai_model"
-CONF_FARMOS_URL = "farmos_url"
-CONF_FARMOS_USERNAME = "farmos_username"
-CONF_FARMOS_PASSWORD = "farmos_password"
 
 # ── Defaults ───────────────────────────────────────────────────────────────
-# 24-hour interval. The coordinator only reads weather entity values —
-# species data is fetched once when a plant is added (via the search API)
-# and cached on the plant record. Never re-fetched on a schedule.
 DEFAULT_UPDATE_INTERVAL = 1440  # minutes (24h)
 DEFAULT_NAME = "Agribuddy"
-
-# ── Verdantly Gardening API (hosted via RapidAPI) ──────────────────────────
-# Auth requires TWO headers per RapidAPI's standard:
-#   x-rapidapi-key:  <user's RapidAPI key>
-#   x-rapidapi-host: verdantly-gardening-api.p.rapidapi.com
-VERDANTLY_BASE_URL = "https://verdantly-gardening-api.p.rapidapi.com"
-VERDANTLY_HOST = "verdantly-gardening-api.p.rapidapi.com"
-VERDANTLY_SEARCH_ENDPOINT = "/v1/plants/varieties/search"
-# RapidAPI marketplace page where users subscribe + get their API key
-VERDANTLY_SIGNUP_URL = "https://rapidapi.com/verdantly-team-verdantly-team-default/api/verdantly-gardening-api"
-
-# ── Legacy aliases ─────────────────────────────────────────────────────────
-# Older code paths still reference Flora/APIFarmer/Verdantly constants;
-# alias them to Verdantly so existing imports keep working through the swap.
-APIFARMER_BASE_URL = VERDANTLY_BASE_URL
-APIFARMER_SEARCH_ENDPOINT = VERDANTLY_SEARCH_ENDPOINT
-APIFARMER_DETAILS_ENDPOINT = (
-    VERDANTLY_SEARCH_ENDPOINT  # Verdantly has no detail endpoint
-)
-APIFARMER_GROWTH_ENDPOINT = VERDANTLY_SEARCH_ENDPOINT
-APIFARMER_REPRODUCTION_ENDPOINT = VERDANTLY_SEARCH_ENDPOINT
-APIFARMER_STAT_ENDPOINT = VERDANTLY_SEARCH_ENDPOINT
-APIFARMER_SIGNUP_URL = VERDANTLY_SIGNUP_URL
-APIFARMER_DOCS_URL = VERDANTLY_SIGNUP_URL
-APIFARMER_FREE_MONTHLY_LIMIT = 0
-FLORA_BASE_URL = VERDANTLY_BASE_URL
-FLORA_SEARCH_ENDPOINT = VERDANTLY_SEARCH_ENDPOINT
-FLORA_DETAIL_ENDPOINT = VERDANTLY_SEARCH_ENDPOINT
-FLORA_SIGNUP_URL = VERDANTLY_SIGNUP_URL
-FLORA_DOCS_URL = VERDANTLY_SIGNUP_URL
-FLORA_FREE_DAILY_LIMIT = 0
-PERENUAL_BASE_URL = VERDANTLY_BASE_URL
-PERENUAL_VALIDATE_ENDPOINT = VERDANTLY_SEARCH_ENDPOINT
-PERENUAL_SEARCH_ENDPOINT = VERDANTLY_SEARCH_ENDPOINT
-PERENUAL_DETAIL_ENDPOINT = VERDANTLY_SEARCH_ENDPOINT
-PERENUAL_SIGNUP_URL = VERDANTLY_SIGNUP_URL
-PERENUAL_FREE_DAILY_LIMIT = 0
-
 
 # ── Plant start types ──────────────────────────────────────────────────────
 START_TYPE_SEED = "seed"
@@ -94,12 +50,10 @@ MANUAL_EVENT_TYPES = [
 EVENT_RAIN_DETECTED = "rain_detected"
 EVENT_FROST_ALERT = "frost_alert"
 
-# Frost detection relies entirely on the weather entity's overnight low —
-# APIFarmer doesn't expose USDA hardiness zones or temperature ranges.
 DEFAULT_FROST_THRESHOLD_C = 2.0
 
 # ── Storage ────────────────────────────────────────────────────────────────
-STORAGE_VERSION = 2
+STORAGE_VERSION = 3
 STORAGE_KEY = f"{DOMAIN}.plants"
 
 # ── Services ───────────────────────────────────────────────────────────────
@@ -113,7 +67,7 @@ SERVICE_UPDATE_PLANT = "update_plant"
 # Service / attribute names
 ATTR_PLANT_ID = "plant_id"
 ATTR_PLANT_NAME = "plant_name"
-ATTR_SPECIES_ID = "species_id"  # Verdantly variety UUID (e.g. "91d05952-...")
+ATTR_SPECIES_ID = "species_id"
 ATTR_START_TYPE = "start_type"
 ATTR_START_DATE = "start_date"
 ATTR_LOCATION = "location"

@@ -1,6 +1,6 @@
 add_plant:
   name: Add plant
-  description: Add a new plant to the Agribuddy garden tracker.
+  description: Add a new plant to the Agribuddy garden tracker (stored in Daystrom).
   fields:
     plant_name:
       name: Plant name
@@ -9,17 +9,17 @@ add_plant:
       example: Cherry Tomatoes
       selector: { text: }
     species_id:
-      name: Verdantly variety UUID
-      description: Verdantly variety UUID (from card search).
+      name: Species/variety ID
+      description: Identifier from plant search results.
       required: true
       example: "2776"
       selector: { text: }
     species_data:
       name: Species data (optional)
       description: >
-        Full Verdantly variety object (returned inline by the search endpoint). When supplied, the backend caches it
-        on the plant record directly and makes zero API calls. The card sends
-        this automatically — manual service calls can omit it.
+        Full species data object from the search endpoint. When supplied,
+        Daystrom caches it on the plant record. The card sends this
+        automatically — manual service calls can omit it.
       required: false
       selector: { object: }
     start_type:
@@ -37,25 +37,25 @@ add_plant:
       example: "2026-04-15"
       selector: { date: }
     location:
-      name: Grow plot
-      description: Optional grow plot or bed label.
+      name: Location
+      description: Optional location description.
       required: false
       example: Raised bed 1
       selector: { text: }
     plot_id:
       name: Grow plot ID
-      description: Optional UUID of the grow plot to assign this plant to.
+      description: Optional ID of the grow plot to assign this plant to.
       required: false
       example: "550e8400-e29b-41d4-a716-446655440000"
       selector: { text: }
 
 remove_plant:
   name: Remove plant
-  description: Permanently remove a plant, all its events, and its cached species data.
+  description: Permanently remove a plant and all its events from Daystrom.
   fields:
     plant_id:
       name: Plant ID
-      description: UUID of the plant.
+      description: ID of the plant.
       required: true
       example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
       selector: { text: }
@@ -82,6 +82,7 @@ log_event:
             - sprouted
             - harvested
             - transplanted
+            - dead
             - other
     note:
       name: Note
@@ -109,9 +110,7 @@ update_plant_overrides:
   name: Update plant overrides
   description: >
     Apply user-supplied display overrides to a plant. Overrides take precedence
-    over the Verdantly species_data when rendering the trading card. They do not
-    modify the cached Verdantly data — sending an empty string for a key removes
-    that override (falls back to Verdantly's value).
+    over the species reference data when rendering the card.
   fields:
     plant_id:
       name: Plant ID
@@ -132,8 +131,7 @@ update_plant_overrides:
         invasive_alert,
         care_instructions, description, habitat,
         image_url.
-        Send an empty string for any field to remove that override (falls
-        back to Verdantly's value).
+        Send an empty string for any field to remove that override.
       required: true
       selector: { object: }
 
@@ -141,10 +139,7 @@ update_plant:
   name: Update plant
   description: >
     Edit the core fields of an existing plant (display name, start date,
-    start type, location, plot assignment). Distinct from
-    update_plant_overrides which only edits species_data display fields.
-    Re-anchors the synthetic 'planted' calendar event when start_date
-    changes so the history view stays consistent.
+    start type, location, plot assignment).
   fields:
     plant_id:
       name: Plant ID

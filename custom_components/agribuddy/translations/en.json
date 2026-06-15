@@ -2,31 +2,23 @@
   "config": {
     "step": {
       "user": {
-        "title": "Plant API (optional)",
-        "description": "Agribuddy now uses a built-in plant variety database (1,900+ varieties). The Verdantly API key is optional — only needed if you want to fall back to their API for varieties not in the database.\n\nLeave blank to skip.",
+        "title": "Daystrom Server",
+        "description": "Connect to your Daystrom data server. This is where all plant and plot data is stored.",
         "data": {
-          "api_key": "RapidAPI key (optional)"
+          "daystrom_url": "Daystrom URL (e.g. http://192.168.1.218:3000)",
+          "daystrom_api_key": "API key (optional)"
         }
       },
       "weather": {
-        "title": "Pick your weather entity",
+        "title": "Weather Entity",
         "description": "Choose any HA entity that surfaces current weather. Agribuddy reads its state for rain/snow detection and its attributes for frost forecasting.",
         "data": {
           "weather_entity": "Weather entity"
         }
       },
-      "farmos": {
-        "title": "FarmOS Integration (optional)",
-        "description": "Connect to a FarmOS instance to sync plants and events. Plants added in Agribuddy will be registered as plant assets in FarmOS.\n\nLeave all fields blank to skip.",
-        "data": {
-          "farmos_url": "FarmOS URL (e.g. http://192.168.1.218:8089)",
-          "farmos_username": "FarmOS username",
-          "farmos_password": "FarmOS password"
-        }
-      },
       "ai_provider": {
         "title": "AI Fallback Provider (optional)",
-        "description": "Configure an OpenAI-compatible API as a fallback for plant varieties not found in the built-in database. Any endpoint that supports chat completions works (OpenAI, Ollama, LM Studio, etc.).\n\nLeave blank to skip.",
+        "description": "Configure an OpenAI-compatible API as a fallback for plant varieties not found in the built-in CSV database. Any endpoint that supports chat completions works (OpenAI, Ollama, LM Studio, etc.).\n\nLeave blank to skip.",
         "data": {
           "ai_api_base": "API base URL (e.g. http://localhost:11434/v1)",
           "ai_api_key": "API key (or 'ollama' for local Ollama)",
@@ -35,12 +27,8 @@
       }
     },
     "error": {
-      "invalid_auth": "Verdantly rejected this key.",
-      "cannot_connect": "Cannot reach the API endpoint.",
-      "rate_limited": "RapidAPI rate limit hit.",
-      "api_error": "API returned an error.",
-      "api_key_empty": "API key cannot be empty.",
-      "farmos_connect_failed": "Could not connect to FarmOS. Check the URL, username, and password. Make sure the Simple OAuth Password Grant module is enabled.",
+      "daystrom_url_empty": "Daystrom URL is required.",
+      "daystrom_connect_failed": "Cannot connect to Daystrom. Check the URL and ensure the server is running.",
       "unknown": "Unexpected error — see HA logs for details."
     },
     "abort": {
@@ -50,13 +38,12 @@
   "options": {
     "step": {
       "init": {
-        "title": "Agribuddy options",
+        "title": "Agribuddy Options",
         "data": {
-          "update_interval": "Update interval (minutes)",
+          "daystrom_url": "Daystrom URL",
+          "daystrom_api_key": "Daystrom API key",
           "weather_entity": "Weather entity",
-          "farmos_url": "FarmOS URL",
-          "farmos_username": "FarmOS username",
-          "farmos_password": "FarmOS password",
+          "update_interval": "Update interval (minutes)",
           "ai_api_base": "AI API base URL",
           "ai_api_key": "AI API key",
           "ai_model": "AI model name"

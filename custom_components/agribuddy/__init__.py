@@ -3,26 +3,15 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import ConfigEntryNotReady  # noqa: F401
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import (
-    VerdantlyApiClient,
-    VerdantlyApiError,
-    VerdantlyAuthError,
-    VerdantlyConnectionError,
-    VerdantlyRateLimitError,
-)
-from .api_usage import ApiUsageTracker
-from .farmos_client import FarmOSClient
-from .providers import CsvProvider, PlantResolver
-from .providers.ai_provider import AiProvider
 from .const import (
     ATTR_EVENT_DATE,
     ATTR_EVENT_ID,
@@ -34,21 +23,15 @@ from .const import (
     ATTR_SPECIES_ID,
     ATTR_START_DATE,
     ATTR_START_TYPE,
-    CONF_API_KEY,
+    CONF_AI_API_BASE,
+    CONF_AI_API_KEY,
+    CONF_AI_MODEL,
+    CONF_DAYSTROM_API_KEY,
+    CONF_DAYSTROM_URL,
     CONF_UPDATE_INTERVAL,
     CONF_WEATHER_ENTITY,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
-    EVENT_BLIGHT,
-    EVENT_DEAD,
-    EVENT_FERTILIZED,
-    EVENT_HARVESTED,
-    EVENT_OTHER,
-    EVENT_PEST,
-    EVENT_PLANTED,
-    EVENT_SPROUTED,
-    EVENT_TRANSPLANTED,
-    EVENT_WATERED,
     MANUAL_EVENT_TYPES,
     SERVICE_ADD_PLANT,
     SERVICE_LOG_EVENT,
@@ -59,8 +42,10 @@ from .const import (
     START_TYPES,
 )
 from .coordinator import AgribuddyCoordinator
+from .daystrom_client import DaystromClient
 from .http_api import async_register_views
-from .store import PlantStore
+from .providers import CsvProvider, PlantResolver
+from .providers.ai_provider import AiProvider
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR]
@@ -78,14 +63,13 @@ _ADD_PLANT_SCHEMA = vol.Schema(
         vol.Optional(ATTR_START_DATE): cv.date,
         vol.Optional(ATTR_LOCATION, default=""): cv.string,
         vol.Optional("plot_id"): cv.string,
-        # Optional pre-fetched species detail. When the card already has the full
-        # APIFarmer response (from the search call), it includes it here so the backend
-        # doesn't need to make any additional API call to cache the species.
         vol.Optional("species_data"): dict,
     }
 )
 
-_REMOVE_PLANT_SCHEMA = vol.Schema({vol.Required(ATTR_PLANT_ID): cv.string})
+_REMOVE_PLANT_SCHEMA = vol.Schema(
+    {vol.Required(ATTR_PLANT_ID): cv.string}
+)
 
 _LOG_EVENT_SCHEMA = vol.Schema(
     {
@@ -106,16 +90,10 @@ _REMOVE_EVENT_SCHEMA = vol.Schema(
 _UPDATE_OVERRIDES_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_PLANT_ID): cv.string,
-        # Dict of display-field overrides. Empty string for a key removes that
-        # override (falls back to APIFarmer's value). None / missing keys are ignored.
-        vol.Required("overrides"): dict,
+        vol.Optional("overrides"): dict,
     }
 )
 
-# ── update_plant: edit the core plant record (display name, start date,
-# location, etc.) — distinct from update_plant_overrides which only edits
-# species_data display fields. All ATTR_* fields are optional; only those
-# supplied get updated. The card's "Plant settings" overlay calls this.
 _UPDATE_PLANT_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_PLANT_ID): cv.string,
@@ -123,572 +101,236 @@ _UPDATE_PLANT_SCHEMA = vol.Schema(
         vol.Optional(ATTR_START_TYPE): vol.In(START_TYPES),
         vol.Optional(ATTR_START_DATE): cv.date,
         vol.Optional(ATTR_LOCATION): cv.string,
-        vol.Optional("plot_id"): vol.Any(cv.string, None),
+        vol.Optional("plot_id"): cv.string,
     }
 )
 
 
-# ── Lifecycle ─────────────────────────────────────────────────────────────────
-
-
-async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    hass.data.setdefault(DOMAIN, {})
-    async_register_views(hass)
-    return True
-
+# ── Setup ─────────────────────────────────────────────────────────────────────
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up Agribuddy from a config entry."""
+    hass.data.setdefault(DOMAIN, {})
+
     session = async_get_clientsession(hass)
-    # IMPORTANT: Verdantly's free tier on RapidAPI allows only 25 calls per
-    # MONTH. Calling api.validate() on every HA startup would burn one call
-    # against the quota each time the user reboots — quickly draining their
-    # budget. We skip startup validation entirely. The first real search
-    # will surface any auth issue with a clear error to the user.
-    tracker = ApiUsageTracker(hass)
-    await tracker.async_load()
-    api = VerdantlyApiClient(
-        entry.data[CONF_API_KEY],
-        session,
-        on_request=lambda endpoint: tracker.record(),
-    )
-    _LOGGER.info(
-        "Agribuddy: API client initialized (validation skipped to preserve "
-        "the 25-call/month Verdantly quota). Monthly calls used so far: %d",
-        tracker.current_count(),
+
+    # ── Daystrom client (required) ───────────────────────────────────────
+    daystrom_url = entry.data.get(CONF_DAYSTROM_URL, "")
+    daystrom_api_key = entry.data.get(CONF_DAYSTROM_API_KEY, "")
+
+    if not daystrom_url:
+        _LOGGER.error("Agribuddy: Daystrom URL not configured")
+        return False
+
+    daystrom = DaystromClient(
+        base_url=daystrom_url, session=session, api_key=daystrom_api_key
     )
 
-    # ── Plant reference data providers ────────────────────────────────────
-    from .const import CONF_AI_API_BASE, CONF_AI_API_KEY, CONF_AI_MODEL
-
-    providers: list = []
-
-    # Primary: local CSV dataset (fast, free, authoritative)
-    csv_provider = CsvProvider()
-    csv_provider.load()
-    providers.append(csv_provider)
-
-    # Fallback: AI provider (if configured)
-    ai_base = entry.options.get(CONF_AI_API_BASE, entry.data.get(CONF_AI_API_BASE, ""))
-    ai_key = entry.options.get(CONF_AI_API_KEY, entry.data.get(CONF_AI_API_KEY, ""))
-    ai_model = entry.options.get(CONF_AI_MODEL, entry.data.get(CONF_AI_MODEL, ""))
-    if ai_base and ai_key and ai_model:
-        ai_provider = AiProvider(
-            api_base=ai_base,
-            api_key=ai_key,
-            model=ai_model,
-            session=session,
-        )
-        providers.append(ai_provider)
-        _LOGGER.info("Agribuddy: AI fallback provider configured (model=%s)", ai_model)
-    else:
+    try:
+        health = await daystrom.health()
         _LOGGER.info(
-            "Agribuddy: AI fallback provider not configured — "
-            "only CSV dataset will be used for plant searches"
+            "Agribuddy: connected to Daystrom v%s at %s",
+            health.get("version", "unknown"),
+            daystrom_url,
         )
+    except Exception as err:
+        _LOGGER.error("Agribuddy: cannot reach Daystrom at %s: %s", daystrom_url, err)
+        return False
+
+    # ── Plant reference providers (CSV + optional AI) ────────────────────
+    csv_provider = CsvProvider()
+    await csv_provider.load()
+    providers = [csv_provider]
+
+    ai_base = entry.data.get(CONF_AI_API_BASE, "")
+    ai_key = entry.data.get(CONF_AI_API_KEY, "")
+    ai_model = entry.data.get(CONF_AI_MODEL, "")
+    if ai_base and ai_key and ai_model:
+        ai_provider = AiProvider(api_base=ai_base, api_key=ai_key, model=ai_model)
+        providers.append(ai_provider)
+        _LOGGER.info("Agribuddy: AI fallback provider configured (%s)", ai_model)
 
     resolver = PlantResolver(providers=providers)
-    _LOGGER.info(
-        "Agribuddy: PlantResolver initialized with providers: %s",
-        resolver.provider_names,
-    )
+    _LOGGER.info("Agribuddy: PlantResolver initialized with providers: %s", resolver.provider_names)
 
-    # ── FarmOS integration (optional) ─────────────────────────────────────
-    from .const import CONF_FARMOS_URL, CONF_FARMOS_USERNAME, CONF_FARMOS_PASSWORD
-
-    farmos_url = entry.options.get(
-        CONF_FARMOS_URL, entry.data.get(CONF_FARMOS_URL, "")
-    )
-    farmos_user = entry.options.get(
-        CONF_FARMOS_USERNAME, entry.data.get(CONF_FARMOS_USERNAME, "")
-    )
-    farmos_pass = entry.options.get(
-        CONF_FARMOS_PASSWORD, entry.data.get(CONF_FARMOS_PASSWORD, "")
-    )
-    farmos_client: FarmOSClient | None = None
-    if farmos_url and farmos_user and farmos_pass:
-        farmos_client = FarmOSClient(
-            base_url=farmos_url,
-            username=farmos_user,
-            password=farmos_pass,
-            session=session,
-        )
-        try:
-            await farmos_client.authenticate()
-            farm_info = await farmos_client.test_connection()
-            _LOGGER.info(
-                "Agribuddy: FarmOS connected — farm='%s', url='%s'",
-                farm_info.get("name", "unknown"),
-                farmos_url,
-            )
-        except Exception as err:
-            _LOGGER.warning(
-                "Agribuddy: FarmOS connection failed (will retry on use): %s", err
-            )
-            # Don't fail setup — FarmOS sync is optional
-    else:
-        _LOGGER.info("Agribuddy: FarmOS integration not configured")
-
-    store = PlantStore(hass)
-    await store.async_load()
-
+    # ── Coordinator ──────────────────────────────────────────────────────
     update_min = entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
-    # Weather entity may be edited via the options flow (entry.options) OR
-    # the integration's setup wizard (entry.data). options-first so changes
-    # made in Settings → Devices & Services → Agribuddy → Configure take
-    # effect on the next reload; falls back to data for the initial setup
-    # value or when options haven't been touched.
     weather_entity = entry.options.get(
-        CONF_WEATHER_ENTITY,
-        entry.data.get(CONF_WEATHER_ENTITY, ""),
+        CONF_WEATHER_ENTITY, entry.data.get(CONF_WEATHER_ENTITY, "")
     )
-    coord = AgribuddyCoordinator(
+
+    coordinator = AgribuddyCoordinator(
         hass,
-        api,
-        store,
+        daystrom=daystrom,
         weather_entity=weather_entity,
         update_interval_minutes=update_min,
     )
-    await coord.async_config_entry_first_refresh()
+    await coordinator.async_config_entry_first_refresh()
 
     hass.data[DOMAIN][entry.entry_id] = {
-        "api": api,
+        "daystrom": daystrom,
         "resolver": resolver,
-        "farmos": farmos_client,
-        "store": store,
-        "coordinator": coord,
-        "usage": tracker,
-        # In-memory caches — search cache now backed by resolver, but kept
-        # for backward compat with the status endpoint and legacy paths.
-        "species_cache": {},
-        "search_cache": {},
+        "coordinator": coordinator,
+        "weather_entity": weather_entity,
     }
 
+    # ── HTTP endpoints for the Lovelace card ─────────────────────────────
+    async_register_views(hass)
+
+    # ── Register services ────────────────────────────────────────────────
+    _register_services(hass, entry)
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    _register_services(hass)
-    entry.async_on_unload(entry.add_update_listener(_options_updated))
-    _LOGGER.info("Agribuddy: setup complete (entry_id=%s)", entry.entry_id)
     return True
 
 
-async def _options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
-
-
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if ok:
+    """Unload Agribuddy."""
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
-    return ok
+    return unload_ok
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-
-def _get_store(hass: HomeAssistant) -> PlantStore | None:
+def _get_daystrom(hass: HomeAssistant) -> DaystromClient | None:
     for v in hass.data.get(DOMAIN, {}).values():
-        if isinstance(v, dict) and "store" in v:
-            return v["store"]
+        if isinstance(v, dict) and "daystrom" in v:
+            return v["daystrom"]
     return None
 
 
-def _get_api(hass: HomeAssistant) -> VerdantlyApiClient | None:
-    for v in hass.data.get(DOMAIN, {}).values():
-        if isinstance(v, dict) and "api" in v:
-            return v["api"]
-    return None
-
-
-def _get_caches(hass: HomeAssistant) -> dict | None:
-    """Return the integration's in-memory caches dict, or None if not set up.
-
-    Caches are { 'species_cache': {id: detail}, 'search_cache': {q: (ts, results)} }.
-    """
-    for v in hass.data.get(DOMAIN, {}).values():
-        if isinstance(v, dict) and "species_cache" in v:
-            return v
-    return None
-
-
-def _get_farmos(hass: HomeAssistant):
-    """Return the FarmOSClient instance if configured, or None."""
-    for v in hass.data.get(DOMAIN, {}).values():
-        if isinstance(v, dict) and "farmos" in v:
-            return v["farmos"]
-    return None
-
-
-async def _refresh_all(hass: HomeAssistant) -> None:
-    """Force an immediate, awaited coordinator refresh so HA state attributes
-    update before the bus event fires."""
+def _get_coordinator(hass: HomeAssistant) -> AgribuddyCoordinator | None:
     for v in hass.data.get(DOMAIN, {}).values():
         if isinstance(v, dict) and "coordinator" in v:
-            await v["coordinator"].async_refresh()
+            return v["coordinator"]
+    return None
 
 
-def _fire_data_changed(hass: HomeAssistant, kind: str, **extra) -> None:
-    """Fire a bus event so the Lovelace card can react immediately."""
-    payload = {"kind": kind, **extra}
-    hass.bus.async_fire(f"{DOMAIN}_data_changed", payload)
-    _LOGGER.debug("Agribuddy: fired %s_data_changed kind=%s", DOMAIN, kind)
+def _fire_data_changed(hass: HomeAssistant, **kwargs) -> None:
+    hass.bus.async_fire(f"{DOMAIN}_data_changed", kwargs)
 
 
-def _service_unavailable_notification(hass: HomeAssistant) -> None:
-    hass.async_create_task(
-        hass.services.async_call(
-            "persistent_notification",
-            "create",
-            {
-                "title": "Agribuddy — service unavailable",
-                "message": (
-                    "Agribuddy is not loaded. Go to Settings → Devices & Services "
-                    "→ Agribuddy and check that the integration is healthy."
-                ),
-                "notification_id": f"{DOMAIN}_service_unavailable",
-            },
-        )
-    )
+# ── Service registration ──────────────────────────────────────────────────────
 
+def _register_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Register all Agribuddy services."""
 
-# ── Services ──────────────────────────────────────────────────────────────────
-
-
-def _register_services(hass: HomeAssistant) -> None:
-
-    async def handle_add_plant(call: ServiceCall):
-        store = _get_store(hass)
-        api = _get_api(hass)
-        if not store or not api:
-            _LOGGER.error("Agribuddy: add_plant called but store/api not loaded")
-            _service_unavailable_notification(hass)
+    async def handle_add_plant(call: ServiceCall) -> None:
+        daystrom = _get_daystrom(hass)
+        if not daystrom:
+            _LOGGER.error("Agribuddy: Daystrom client not available")
             return
+
         d = call.data.get(ATTR_START_DATE)
-        species_id = call.data[ATTR_SPECIES_ID]
-        sid_str = str(species_id)
-        # Prefer species_data supplied directly by the caller (the card has
-        # this from its earlier search call). This skips any cache or fallback
-        # logic and means add_plant costs ZERO Flora API calls.
-        supplied = call.data.get("species_data")
-        species_data: dict = {}
-        cache = _get_caches(hass)
-        if isinstance(supplied, dict) and supplied:
-            species_data = supplied
-            if cache:
-                cache["species_cache"][sid_str] = species_data
-            _LOGGER.info(
-                "Agribuddy: add_plant using species_data supplied by caller "
-                "(species_id=%s, %d keys, no APIFarmer call needed)",
-                species_id,
-                len(species_data),
-            )
-        # Fallback chain — only run if the caller didn't supply species_data.
-        # 1. In-memory species cache (populated by previous searches)
-        if not species_data and cache and cache["species_cache"].get(sid_str):
-            species_data = cache["species_cache"][sid_str]
-            _LOGGER.info(
-                "Agribuddy: add_plant reusing in-memory cached species data for id=%s",
-                species_id,
-            )
-        # 2. Already-added plants of the same species
-        if not species_data:
-            for existing in store._data["plants"].values():  # noqa: SLF001
-                if str(existing.get("species_id")) == sid_str and existing.get(
-                    "species_data"
-                ):
-                    species_data = dict(existing["species_data"])
-                    if cache:
-                        cache["species_cache"][sid_str] = species_data
-                    _LOGGER.info(
-                        "Agribuddy: add_plant reusing species data for id=%s from existing plant",
-                        species_id,
-                    )
-                    break
-        # 3. Last resort — try the API directly
-        # currently returns {} and is essentially a no-op safety net. Logged
-        # at INFO so it's visible if the card ever stops supplying species_data.
-        if not species_data:
-            try:
-                species_data = await api.get_species_detail(species_id)
-                if species_data and cache:
-                    cache["species_cache"][sid_str] = species_data
-                _LOGGER.info(
-                    "Agribuddy: add_plant fetched species id=%s via api fallback "
-                    "(%d keys)",
-                    species_id,
-                    len(species_data or {}),
-                )
-            except VerdantlyRateLimitError as err:
-                _LOGGER.warning(
-                    "Agribuddy: rate limit hit when fetching species id=%s — plant "
-                    "added with empty species cache. User will need to re-search. (%s)",
-                    species_id,
-                    err,
-                )
-            except (
-                VerdantlyApiError,
-                VerdantlyAuthError,
-                VerdantlyConnectionError,
-            ) as err:
-                _LOGGER.warning(
-                    "Agribuddy: could not fetch species id=%s during add_plant: %s. "
-                    "Plant added without cached data — search for it again to repopulate.",
-                    species_id,
-                    err,
-                )
+        start_date = d.isoformat() if isinstance(d, date) else d or date.today().isoformat()
 
-        plant = await store.async_add_plant(
+        plant = await daystrom.add_plant(
             name=call.data[ATTR_PLANT_NAME],
-            species_id=species_id,
+            species_id=str(call.data[ATTR_SPECIES_ID]),
             start_type=call.data.get(ATTR_START_TYPE, "seed"),
-            start_date=d.isoformat() if d else None,
+            start_date=start_date,
             location=call.data.get(ATTR_LOCATION, ""),
-            plot_id=call.data.get("plot_id"),
-            species_data=species_data,
+            plot_id=call.data.get("plot_id", ""),
+            species_data=call.data.get("species_data"),
         )
-        # Log a "planted" event on the start_date so it shows up on the
-        # calendar and in the plant's History tab. This is informational —
-        # it gives users a visible marker for the planting day, especially
-        # when they back-date the plant.
-        try:
-            start_type = plant.get("start_type", "seed")
-            note = f"Planted from {start_type}"
-            await store.async_log_event(
-                plant_id=plant["id"],
-                event_type=EVENT_PLANTED,
-                note=note,
-                event_date=plant["start_date"],
-                auto=True,
-            )
-        except Exception as err:
-            _LOGGER.warning(
-                "Agribuddy: could not log planted event for %s — %s",
-                plant["id"],
-                err,
-            )
 
-        # ── Sync to FarmOS (non-blocking, best-effort) ────────────────────
-        farmos = _get_farmos(hass)
-        if farmos and species_data:
-            try:
-                from .providers.base import PlantVariety
+        coordinator = _get_coordinator(hass)
+        if coordinator:
+            await coordinator.async_request_refresh()
+        _fire_data_changed(hass, kind="plant_added", plant_id=plant.get("id"))
 
-                is_canonical = "source" in species_data and "variety_id" in species_data
-                if is_canonical:
-                    # The card's normalized format uses common_name/variety_name
-                    # but PlantVariety expects 'name'. Map before constructing.
-                    sd = dict(species_data)
-                    if "name" not in sd:
-                        sd["name"] = sd.get("common_name") or sd.get("variety_name", "")
-                    if "category" not in sd:
-                        sd["category"] = sd.get("category", "")
-                    variety = PlantVariety.from_dict(sd)
-                    result = await farmos.register_plant(
-                        variety=variety,
-                        plant_name=call.data[ATTR_PLANT_NAME],
-                        location_name=call.data.get(ATTR_LOCATION, ""),
-                    )
-                    _LOGGER.info(
-                        "Agribuddy: synced to FarmOS — plant_type_id=%s, asset_id=%s",
-                        result.get("plant_type_id"),
-                        result.get("asset_id"),
-                    )
-                else:
-                    _LOGGER.debug(
-                        "Agribuddy: skipping FarmOS sync — species_data is legacy format"
-                    )
-            except Exception as err:
-                _LOGGER.warning(
-                    "Agribuddy: FarmOS sync failed for plant '%s': %s (plant still added locally)",
-                    call.data[ATTR_PLANT_NAME],
-                    err,
-                )
-
-        await _refresh_all(hass)
-        _fire_data_changed(hass, kind="plant_added", plant_id=plant["id"])
-
-    async def handle_remove_plant(call: ServiceCall):
-        store = _get_store(hass)
-        if not store:
-            _service_unavailable_notification(hass)
+    async def handle_remove_plant(call: ServiceCall) -> None:
+        daystrom = _get_daystrom(hass)
+        if not daystrom:
             return
-        pid = call.data[ATTR_PLANT_ID]
-        ok = await store.async_remove_plant(pid)
-        if not ok:
-            _LOGGER.warning("Agribuddy: remove_plant — plant id=%s not found", pid)
-            return
-        await _refresh_all(hass)
-        _fire_data_changed(hass, kind="plant_removed", plant_id=pid)
+        await daystrom.remove_plant(call.data[ATTR_PLANT_ID])
+        coordinator = _get_coordinator(hass)
+        if coordinator:
+            await coordinator.async_request_refresh()
+        _fire_data_changed(hass, kind="plant_removed", plant_id=call.data[ATTR_PLANT_ID])
 
-    async def handle_log_event(call: ServiceCall):
-        store = _get_store(hass)
-        if not store:
-            _service_unavailable_notification(hass)
+    async def handle_log_event(call: ServiceCall) -> None:
+        daystrom = _get_daystrom(hass)
+        if not daystrom:
             return
         d = call.data.get(ATTR_EVENT_DATE)
-        event = await store.async_log_event(
+        event_date = d.isoformat() if isinstance(d, date) else d
+
+        event = await daystrom.log_event(
             plant_id=call.data[ATTR_PLANT_ID],
             event_type=call.data[ATTR_EVENT_TYPE],
             note=call.data.get(ATTR_EVENT_NOTE, ""),
-            event_date=d.isoformat() if d else None,
+            event_date=event_date,
         )
         if event is None:
-            _LOGGER.warning(
-                "Agribuddy: log_event for plant %s failed (plant not found?)",
-                call.data[ATTR_PLANT_ID],
-            )
+            _LOGGER.warning("Agribuddy: log_event failed for plant %s", call.data[ATTR_PLANT_ID])
             return
 
-        # ── Sync event to FarmOS log (best-effort) ───────────────────────
-        farmos = _get_farmos(hass)
-        if not farmos:
-            _LOGGER.warning("Agribuddy: FarmOS client not available for event sync")
-        if farmos:
-            event_to_farmos_log_type = {
-                EVENT_WATERED: "activity",
-                EVENT_FERTILIZED: "input",
-                EVENT_HARVESTED: "harvest",
-                EVENT_PLANTED: "seeding",
-                EVENT_TRANSPLANTED: "activity",
-                EVENT_PEST: "observation",
-                EVENT_BLIGHT: "observation",
-                EVENT_SPROUTED: "observation",
-                EVENT_DEAD: "observation",
-                EVENT_OTHER: "observation",
-            }
-            farmos_log_type = event_to_farmos_log_type.get(
-                call.data[ATTR_EVENT_TYPE], "observation"
-            )
-            try:
-                # FarmOS requires full ISO 8601 datetime, not just a date
-                farmos_timestamp = None
-                if d:
-                    farmos_timestamp = f"{d.isoformat()}T12:00:00+00:00"
-                await farmos.create_log(
-                    log_type=farmos_log_type,
-                    name=f"{call.data[ATTR_EVENT_TYPE]} — {call.data[ATTR_PLANT_ID][:8]}",
-                    notes=call.data.get(ATTR_EVENT_NOTE, ""),
-                    timestamp=farmos_timestamp,
-                )
-            except Exception as err:
-                _LOGGER.warning(
-                    "Agribuddy: FarmOS log sync failed for event '%s': %s",
-                    call.data[ATTR_EVENT_TYPE],
-                    err,
-                )
-
-        await _refresh_all(hass)
+        coordinator = _get_coordinator(hass)
+        if coordinator:
+            await coordinator.async_request_refresh()
         _fire_data_changed(
             hass,
             kind="event_logged",
             plant_id=call.data[ATTR_PLANT_ID],
-            event_id=event["id"],
-            event_type=event["type"],
+            event_id=event.get("id"),
+            event_type=call.data[ATTR_EVENT_TYPE],
         )
 
-    async def handle_remove_event(call: ServiceCall):
-        store = _get_store(hass)
-        if not store:
-            _service_unavailable_notification(hass)
+    async def handle_remove_event(call: ServiceCall) -> None:
+        daystrom = _get_daystrom(hass)
+        if not daystrom:
             return
-        pid = call.data[ATTR_PLANT_ID]
-        eid = call.data[ATTR_EVENT_ID]
-        ok = await store.async_remove_event(pid, eid)
-        if not ok:
-            _LOGGER.warning(
-                "Agribuddy: remove_event — could not remove event id=%s on plant %s",
-                eid,
-                pid,
-            )
-            return
-        await _refresh_all(hass)
-        _fire_data_changed(hass, kind="event_removed", plant_id=pid, event_id=eid)
+        await daystrom.remove_event(call.data[ATTR_PLANT_ID], call.data[ATTR_EVENT_ID])
+        coordinator = _get_coordinator(hass)
+        if coordinator:
+            await coordinator.async_request_refresh()
+        _fire_data_changed(
+            hass, kind="event_removed",
+            plant_id=call.data[ATTR_PLANT_ID],
+            event_id=call.data[ATTR_EVENT_ID],
+        )
 
-    async def handle_update_overrides(call: ServiceCall):
-        """Apply user-supplied override values to a plant.
-
-        Overrides are display-only — they don't change the cached Flora
-        species_data, just what the trading card shows. An empty string for
-        any field removes that override (falls back to APIFarmer's value).
-        """
-        store = _get_store(hass)
-        if not store:
-            _service_unavailable_notification(hass)
+    async def handle_update_overrides(call: ServiceCall) -> None:
+        daystrom = _get_daystrom(hass)
+        if not daystrom:
             return
-        pid = call.data[ATTR_PLANT_ID]
         overrides = call.data.get("overrides") or {}
-        result = await store.async_update_overrides(pid, overrides)
-        if result is None:
-            _LOGGER.warning(
-                "Agribuddy: update_plant_overrides — no plant with id=%s",
-                pid,
-            )
-            return
-        await _refresh_all(hass)
-        _fire_data_changed(hass, kind="plant_overrides_updated", plant_id=pid)
+        await daystrom.update_plant(call.data[ATTR_PLANT_ID], overrides=overrides)
+        coordinator = _get_coordinator(hass)
+        if coordinator:
+            await coordinator.async_request_refresh()
+        _fire_data_changed(hass, kind="overrides_updated", plant_id=call.data[ATTR_PLANT_ID])
 
-    async def handle_update_plant(call: ServiceCall):
-        """Update the core fields of an existing plant (name, start date,
-        start type, location, plot assignment).
-
-        Distinct from update_plant_overrides — overrides only affect display
-        fields sourced from species_data. update_plant edits the plant
-        record itself. Sending a key with a value updates it; omitted keys
-        are left as-is.
-        """
-        store = _get_store(hass)
-        if not store:
-            _service_unavailable_notification(hass)
+    async def handle_update_plant(call: ServiceCall) -> None:
+        daystrom = _get_daystrom(hass)
+        if not daystrom:
             return
-        pid = call.data[ATTR_PLANT_ID]
-        # Build kwargs by mapping schema attr names → store kwarg names.
-        # Only include keys the caller actually provided so we don't
-        # accidentally clear fields by sending None.
-        kw = {}
+        kwargs = {}
         if ATTR_PLANT_NAME in call.data:
-            kw["name"] = call.data[ATTR_PLANT_NAME]
+            kwargs["name"] = call.data[ATTR_PLANT_NAME]
         if ATTR_START_TYPE in call.data:
-            kw["start_type"] = call.data[ATTR_START_TYPE]
+            kwargs["start_type"] = call.data[ATTR_START_TYPE]
         if ATTR_START_DATE in call.data:
             d = call.data[ATTR_START_DATE]
-            kw["start_date"] = d.isoformat() if d else None
+            kwargs["start_date"] = d.isoformat() if isinstance(d, date) else d
         if ATTR_LOCATION in call.data:
-            kw["location"] = call.data[ATTR_LOCATION]
+            kwargs["location"] = call.data[ATTR_LOCATION]
         if "plot_id" in call.data:
-            kw["plot_id"] = call.data["plot_id"]
-        if not kw:
-            _LOGGER.debug("Agribuddy: update_plant for %s — no fields supplied", pid)
-            return
-        result = await store.async_update_plant(pid, **kw)
-        if result is None:
-            _LOGGER.warning("Agribuddy: update_plant — no plant with id=%s", pid)
-            return
-        # If start_date changed, the synthetic "planted" event we created at
-        # add-time is now stale (still on the old date). Re-anchor it.
-        if kw.get("start_date"):
-            try:
-                await store.async_reanchor_planted_event(pid, kw["start_date"])
-            except Exception as err:
-                _LOGGER.debug("Agribuddy: could not re-anchor planted event: %s", err)
-        await _refresh_all(hass)
-        _fire_data_changed(hass, kind="plant_updated", plant_id=pid)
+            kwargs["plot_id"] = call.data["plot_id"]
 
-    hass.services.async_register(
-        DOMAIN, SERVICE_ADD_PLANT, handle_add_plant, schema=_ADD_PLANT_SCHEMA
-    )
-    hass.services.async_register(
-        DOMAIN, SERVICE_REMOVE_PLANT, handle_remove_plant, schema=_REMOVE_PLANT_SCHEMA
-    )
-    hass.services.async_register(
-        DOMAIN, SERVICE_LOG_EVENT, handle_log_event, schema=_LOG_EVENT_SCHEMA
-    )
-    hass.services.async_register(
-        DOMAIN, SERVICE_REMOVE_EVENT, handle_remove_event, schema=_REMOVE_EVENT_SCHEMA
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_UPDATE_OVERRIDES,
-        handle_update_overrides,
-        schema=_UPDATE_OVERRIDES_SCHEMA,
-    )
-    hass.services.async_register(
-        DOMAIN, SERVICE_UPDATE_PLANT, handle_update_plant, schema=_UPDATE_PLANT_SCHEMA
-    )
+        await daystrom.update_plant(call.data[ATTR_PLANT_ID], **kwargs)
+        coordinator = _get_coordinator(hass)
+        if coordinator:
+            await coordinator.async_request_refresh()
+        _fire_data_changed(hass, kind="plant_updated", plant_id=call.data[ATTR_PLANT_ID])
+
+    # Register all services
+    hass.services.async_register(DOMAIN, SERVICE_ADD_PLANT, handle_add_plant, schema=_ADD_PLANT_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_REMOVE_PLANT, handle_remove_plant, schema=_REMOVE_PLANT_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_LOG_EVENT, handle_log_event, schema=_LOG_EVENT_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_REMOVE_EVENT, handle_remove_event, schema=_REMOVE_EVENT_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_UPDATE_OVERRIDES, handle_update_overrides, schema=_UPDATE_OVERRIDES_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_UPDATE_PLANT, handle_update_plant, schema=_UPDATE_PLANT_SCHEMA)

@@ -120,7 +120,7 @@ class PlantProvider(ABC):
     @property
     @abstractmethod
     def provider_name(self) -> str:
-        """Short identifier for this provider (e.g., 'csv', 'ai', 'verdantly')."""
+        """Short identifier for this provider (e.g., 'csv', 'ai')."""
 
     @abstractmethod
     async def search(self, query: str) -> list[PlantVariety]:

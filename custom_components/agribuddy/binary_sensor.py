@@ -38,8 +38,8 @@ def _device(entry: ConfigEntry) -> DeviceInfo:
         identifiers={(DOMAIN, entry.entry_id)},
         name="Agribuddy",
         manufacturer="Agribuddy",
-        model="Verdantly plant database",
-        sw_version="0.1.0",
+        model="Daystrom",
+        sw_version="3.0.0",
     )
 
 

@@ -1,25 +1,16 @@
 """DataUpdateCoordinator for Agribuddy.
 
-Reads weather data from a HA weather entity. Does NOT auto-refresh species
-data from Verdantly — that's fetched once when a plant is added and cached on
-the plant record.
-
-The 24h `update_interval` is a periodic safety net; the real-time work happens
-via `async_track_state_change_event`, which fires whenever the configured
-weather entity changes state or attributes. That listener:
-  - Re-reads the entity into our flat weather dict
-  - Detects rain / snow / frost using `_check_rain` etc.
-  - Persists today's observation to store.weather_log (for the calendar)
-  - Logs `rain_detected` events on every active plant when rain is first seen
-    that day (so days_since_watered resets and "needs water" indicators clear)
-  - Fires the `agribuddy_data_changed` bus event so the card refreshes immediately
+Reads plant data from Daystrom and weather data from a HA weather entity.
+The periodic refresh (default 24h) is a safety net; real-time weather
+reactions happen via async_track_state_change_event on the configured
+weather entity.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.event import async_track_state_change_event
@@ -30,23 +21,20 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     EVENT_FROST_ALERT,
+    EVENT_RAIN_DETECTED,
 )
-
-if TYPE_CHECKING:
-    from .api import VerdantlyApiClient
-    from .store import PlantStore
+from .daystrom_client import DaystromClient
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class AgribuddyCoordinator(DataUpdateCoordinator):
-    """Reads the configured weather entity and emits frost/rain auto-events."""
+    """Reads plant data from Daystrom and weather from the configured HA entity."""
 
     def __init__(
         self,
         hass: HomeAssistant,
-        api: VerdantlyApiClient,
-        store: PlantStore,
+        daystrom: DaystromClient,
         weather_entity: str,
         update_interval_minutes: int = DEFAULT_UPDATE_INTERVAL,
     ) -> None:
@@ -56,16 +44,12 @@ class AgribuddyCoordinator(DataUpdateCoordinator):
             name=DOMAIN,
             update_interval=timedelta(minutes=update_interval_minutes),
         )
-        self.api = api
-        self.store = store
+        self.daystrom = daystrom
         self.weather_entity = weather_entity
         self._frost_alerted_date: str | None = None
         self._rain_logged_date: str | None = None
-        # Listener cleanup callback set up in async_setup_listeners
         self._unsub_state_change = None
-        # Set up the weather entity state-change subscription. Without this
-        # we'd only react every update_interval, missing rain that happens
-        # between scheduled refreshes.
+
         if weather_entity:
             self._unsub_state_change = async_track_state_change_event(
                 hass,
@@ -79,95 +63,63 @@ class AgribuddyCoordinator(DataUpdateCoordinator):
 
     @callback
     def _on_weather_state_change(self, event: Event) -> None:
-        """HA bus listener — fires whenever the weather entity changes.
-
-        Schedules an async task so this returns immediately (HA bus listeners
-        should not block on awaits).
-        """
         self.hass.async_create_task(self._process_weather_change(event))
 
     async def _process_weather_change(self, event: Event) -> None:
-        """Read the entity, persist observations, and auto-log rain/frost events."""
+        """Read the entity and auto-log rain/frost events to Daystrom."""
         weather = self._read_weather_entity()
         if not weather:
             return
         today = date.today().isoformat()
         rain = self._check_rain(weather)
-        snow = self._check_snow(weather)
         frost = self._check_frost(weather)
-        condition = (weather.get("condition") or "").strip()
 
         _LOGGER.debug(
             "Agribuddy: weather state change — condition=%r precipitation=%r "
-            "tonight_low=%r → rain=%s snow=%s frost=%s",
-            condition,
+            "tonight_low=%r → rain=%s frost=%s",
+            weather.get("condition"),
             weather.get("precipitation"),
             weather.get("tonight_low"),
             rain,
-            snow,
             frost,
         )
 
-        if rain or snow or frost or condition:
-            changed = await self.store.async_record_weather(
-                date_str=today,
-                rain=rain,
-                snow=snow,
-                frost=frost,
-                condition=condition,
-            )
-            if changed:
-                # Bus event so the card refreshes weather_log + plant data
-                self.hass.bus.async_fire(
-                    f"{DOMAIN}_data_changed",
-                    {
-                        "kind": "weather_logged",
-                        "date": today,
-                        "rain": rain,
-                        "snow": snow,
-                        "frost": frost,
-                    },
-                )
-
-        # Auto-log rain to every plant the first time we see rain today.
-        # This is what makes days_since_watered reset and "needs water"
-        # indicators clear.
         if rain and self._rain_logged_date != today:
             _LOGGER.info(
-                "Agribuddy: rain detected (condition=%r, precip=%r) — auto-logging "
-                "rain event for all plants. days_since_watered will reset.",
-                condition,
-                weather.get("precipitation"),
+                "Agribuddy: rain detected — auto-logging rain event for all active plants"
             )
-            await self.store.async_log_rain_all(0.0)
+            await self._log_rain_all_plants()
             self._rain_logged_date = today
+            self.hass.bus.async_fire(
+                f"{DOMAIN}_data_changed",
+                {"kind": "weather_logged", "date": today, "rain": True},
+            )
 
-        # Frost alert (existing behaviour, kept here so realtime state changes
-        # can trigger it instead of waiting for the periodic refresh)
         if frost and self._frost_alerted_date != today:
-            plants = self.store.get_all_plants()
-            active = [p for p in plants if not p.get("is_scheduled", False)]
-            await self._maybe_frost_alert(weather, active, today)
+            await self._maybe_frost_alert(weather, today)
 
     async def _async_update_data(self) -> dict[str, Any]:
+        """Periodic refresh — pull plants from Daystrom and read weather."""
         weather = self._read_weather_entity()
         today = date.today().isoformat()
 
-        plants = self.store.get_all_plants()
-        # Future-scheduled plants don't trigger frost/rain logic
-        active_plants = [p for p in plants if not p.get("is_scheduled", False)]
+        plants = await self.daystrom.get_plants(status="active")
+        plots = await self.daystrom.get_plots()
 
         frost_tonight = self._check_frost(weather)
         rain_today = self._check_rain(weather)
 
-        await self._maybe_rain(rain_today, today, weather)
-        if frost_tonight:
-            await self._maybe_frost_alert(weather, active_plants, today)
+        if rain_today and self._rain_logged_date != today:
+            await self._log_rain_all_plants()
+            self._rain_logged_date = today
+
+        if frost_tonight and self._frost_alerted_date != today:
+            await self._maybe_frost_alert(weather, today)
 
         return {
             "weather": weather,
             "plants": plants,
-            "plots": self.store.get_all_plots(),
+            "plots": plots,
             "frost_tonight": frost_tonight,
             "rain_today": rain_today,
         }
@@ -189,8 +141,7 @@ class AgribuddyCoordinator(DataUpdateCoordinator):
         state = self.hass.states.get(self.weather_entity)
         if state is None:
             _LOGGER.warning(
-                "Agribuddy: weather entity '%s' not found in HA. "
-                "Update via card Settings or remove and re-add the integration.",
+                "Agribuddy: weather entity '%s' not found in HA.",
                 self.weather_entity,
             )
             return {}
@@ -218,7 +169,6 @@ class AgribuddyCoordinator(DataUpdateCoordinator):
 
     @staticmethod
     def _check_frost(weather: dict) -> bool:
-        """Frost detection relies on the weather entity's overnight low."""
         low = weather.get("tonight_low")
         if low is None:
             return False
@@ -229,14 +179,6 @@ class AgribuddyCoordinator(DataUpdateCoordinator):
 
     @staticmethod
     def _check_rain(weather: dict) -> bool:
-        """Returns True if the entity indicates rain is currently observable.
-
-        Checks (in order):
-          1. precipitation attribute > 0
-          2. state string contains rain-related keywords
-          3. forecast[0] indicates rain (some entities only set the condition
-             on the forecast slot for the current period)
-        """
         precip = weather.get("precipitation")
         if precip is not None:
             try:
@@ -245,14 +187,7 @@ class AgribuddyCoordinator(DataUpdateCoordinator):
             except (ValueError, TypeError):
                 pass
         cond = (weather.get("condition") or "").lower().replace("-", "_")
-        rain_keywords = (
-            "rain",
-            "drizzle",
-            "shower",
-            "thunder",
-            "pour",
-            "lightning_rainy",
-        )
+        rain_keywords = ("rain", "drizzle", "shower", "thunder", "pour", "lightning_rainy")
         if any(w in cond for w in rain_keywords):
             return True
         forecast = weather.get("forecast") or []
@@ -264,7 +199,6 @@ class AgribuddyCoordinator(DataUpdateCoordinator):
 
     @staticmethod
     def _check_snow(weather: dict) -> bool:
-        """Returns True if the entity indicates snow."""
         cond = (weather.get("condition") or "").lower().replace("-", "_")
         snow_keywords = ("snow", "snowy", "sleet", "blizzard", "flurries")
         if any(w in cond for w in snow_keywords):
@@ -278,44 +212,47 @@ class AgribuddyCoordinator(DataUpdateCoordinator):
 
     # ── Auto-events ───────────────────────────────────────────────────────────
 
-    async def _maybe_rain(self, rain: bool, today: str, weather: dict) -> None:
-        """Called from the periodic refresh path. Auto-logs rain at most once
-        per day. Realtime state changes go through _process_weather_change."""
-        if not rain or self._rain_logged_date == today:
-            return
-        # Also record the observation so the calendar shows the rain cloud icon
-        await self.store.async_record_weather(
-            date_str=today,
-            rain=True,
-            condition=(weather.get("condition") or "").strip(),
-        )
-        _LOGGER.info(
-            "Agribuddy: auto-logging rain event for active plants (periodic refresh)"
-        )
-        await self.store.async_log_rain_all(0.0)
-        self._rain_logged_date = today
-        self.hass.bus.async_fire(
-            f"{DOMAIN}_data_changed",
-            {"kind": "weather_logged", "date": today, "rain": True},
-        )
+    async def _log_rain_all_plants(self) -> None:
+        """Log a rain_detected event on every active plant via Daystrom."""
+        try:
+            plants = await self.daystrom.get_plants(status="active")
+            for plant in plants:
+                plant_id = plant.get("id")
+                if plant_id:
+                    await self.daystrom.log_event(
+                        plant_id=str(plant_id),
+                        event_type=EVENT_RAIN_DETECTED,
+                        note="Auto-detected from weather entity",
+                        auto=True,
+                    )
+            _LOGGER.info("Agribuddy: rain event logged for %d active plants", len(plants))
+        except Exception as err:
+            _LOGGER.warning("Agribuddy: failed to auto-log rain events: %s", err)
 
-    async def _maybe_frost_alert(self, weather: dict, plants: list, today: str) -> None:
-        if self._frost_alerted_date == today or not plants:
+    async def _maybe_frost_alert(self, weather: dict, today: str) -> None:
+        if self._frost_alerted_date == today:
             return
         low = weather.get("tonight_low", "?")
-        for plant in plants:
-            await self.store.async_log_event(
-                plant["id"],
-                EVENT_FROST_ALERT,
-                note=f"Overnight low forecast: {low}°C",
-                auto=True,
-            )
+        try:
+            plants = await self.daystrom.get_plants(status="active")
+            for plant in plants:
+                plant_id = plant.get("id")
+                if plant_id:
+                    await self.daystrom.log_event(
+                        plant_id=str(plant_id),
+                        event_type=EVENT_FROST_ALERT,
+                        note=f"Overnight low forecast: {low}°C",
+                        auto=True,
+                    )
+        except Exception as err:
+            _LOGGER.warning("Agribuddy: failed to log frost alerts: %s", err)
+
         self.hass.async_create_task(
             self.hass.services.async_call(
                 "persistent_notification",
                 "create",
                 {
-                    "title": "Agribuddy — Frost Alert ❄️",
+                    "title": "Agribuddy — Frost Alert",
                     "message": f"Frost risk tonight! Low: {low}°C. Check your plants.",
                     "notification_id": f"{DOMAIN}_frost_{today}",
                 },
@@ -333,8 +270,6 @@ class AgribuddyCoordinator(DataUpdateCoordinator):
         return (self.data or {}).get("plants", [])
 
     def get_plots(self) -> list:
-        """Enriched grow plots (each with a `plants` list). Consumers filter
-        out the virtual Unassigned plot as needed."""
         return (self.data or {}).get("plots", [])
 
     def is_frost_tonight(self) -> bool:

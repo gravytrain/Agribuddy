@@ -37,8 +37,8 @@ def _device(entry: ConfigEntry) -> DeviceInfo:
         identifiers={(DOMAIN, entry.entry_id)},
         name="Agribuddy",
         manufacturer="Agribuddy",
-        model="Verdantly plant database",
-        sw_version="0.1.0",
+        model="Daystrom",
+        sw_version="3.0.0",
     )
 
 
@@ -289,7 +289,7 @@ class PlantSensor(CoordinatorEntity[AgribuddyCoordinator], SensorEntity):
                 and p.get("days_since_watered") is not None
                 and p.get("days_since_watered") >= (p.get("watering_min_days") or 3)
             ),
-            # Verdantly species data — exposed for automations
+            # Species reference data — exposed for automations
             "common_name": p.get("common_name"),
             "scientific_name": p.get("scientific_name"),
             "sunlight": p.get("sunlight"),
