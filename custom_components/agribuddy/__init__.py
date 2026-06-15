@@ -139,7 +139,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # ── Plant reference providers (CSV + optional AI) ────────────────────
     csv_provider = CsvProvider()
-    await csv_provider.load()
+    csv_provider.load()
     providers = [csv_provider]
 
     ai_base = entry.data.get(CONF_AI_API_BASE, "")
