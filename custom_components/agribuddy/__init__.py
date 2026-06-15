@@ -244,12 +244,16 @@ def _register_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
     async def handle_remove_plant(call: ServiceCall) -> None:
         daystrom = _get_daystrom(hass)
         if not daystrom:
+            _LOGGER.error("Agribuddy: remove_plant — Daystrom client not available")
             return
-        await daystrom.remove_plant(call.data[ATTR_PLANT_ID])
+        plant_id = call.data[ATTR_PLANT_ID]
+        _LOGGER.info("Agribuddy: remove_plant called for plant_id=%s", plant_id)
+        result = await daystrom.remove_plant(plant_id)
+        _LOGGER.info("Agribuddy: remove_plant result=%s for plant_id=%s", result, plant_id)
         coordinator = _get_coordinator(hass)
         if coordinator:
             await coordinator.async_request_refresh()
-        _fire_data_changed(hass, kind="plant_removed", plant_id=call.data[ATTR_PLANT_ID])
+        _fire_data_changed(hass, kind="plant_removed", plant_id=plant_id)
 
     async def handle_log_event(call: ServiceCall) -> None:
         daystrom = _get_daystrom(hass)
